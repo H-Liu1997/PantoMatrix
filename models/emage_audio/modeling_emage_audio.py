@@ -214,10 +214,13 @@ class EmageAudioModel(PreTrainedModel):
         # audio encoder
         self.audio_encoder_face = WavEncoder(self.cfg.audio_f)
         self.audio_encoder_body = WavEncoder(self.cfg.audio_f)
-        #speaker id
+        # speaker id
         self.speaker_embedding_body = nn.Embedding(self.cfg.speaker_dims, self.cfg.hidden_size)
         self.speaker_embedding_face = nn.Embedding(self.cfg.speaker_dims, self.cfg.hidden_size)
         # mask embedding
+        # self.speaker_embedding_face = nn.Parameter(torch.zeros(1,self.cfg.pose_length,self.cfg.hidden_size))
+        # nn.init.normal_(self.speaker_embedding_face, 0, self.cfg.hidden_size**-0.5)
+
         self.mask_embedding = nn.Parameter(torch.zeros(1,1,self.cfg.pose_dims+3+4))
         nn.init.normal_(self.mask_embedding, 0, self.cfg.hidden_size**-0.5)
         # nn.init.normal_(self.speaker_embedding_body.weight, 0, self.cfg.hidden_size/2**-0.5)
@@ -257,71 +260,40 @@ class EmageAudioModel(PreTrainedModel):
         self.motion_cls_lower = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
 
         # face decoder
-        self.audio_face_motion_proj = nn.Linear(self.cfg.audio_f+self.cfg.motion_f, self.cfg.hidden_size)
+        self.audio_face_motion_proj = nn.Linear(self.cfg.audio_f, self.cfg.hidden_size)
         self.face_motion_decoder = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
+        self.face_motion_decoder_2 = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
+        # self.face_motion_decoder = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.hidden_size)
         self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
     
-    def forward(self, audio, speaker_id, masked_motion, mask, use_audio=True):
+    def forward(self, audio, speaker_id, masked_motion, mask, codebook, use_audio=True):
+        # codebook size bs, codebook_size, codebook_dim
         audio2face_fea = self.audio_encoder_face(audio)
-        audio2body_fea = self.audio_encoder_body(audio)
         bs, t, _ = audio2face_fea.shape
+        # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
 
-        speaker_motion_fea_proj = self.speaker_embedding_body(speaker_id).repeat(1, t, 1)
-        speaker_face_fea_proj = self.speaker_embedding_face(speaker_id).repeat(1, t, 1)
+        codebook = self.codebook_proj(codebook)
+        codebook = codebook.unsqueeze(0).repeat(bs, 1, 1)
 
-        # mask motion
-        masked_embeddings = self.mask_embedding.expand_as(masked_motion)
-        masked_motion = torch.where(mask==1, masked_embeddings, masked_motion)
-
-        # motion token (spatial hints)
-        body_hint = self.motion_encoder(masked_motion)
-        body_hint_body = self.bodyhints_body(body_hint)
-        body_hint_face = self.bodyhints_face(body_hint)
-
-        audio2face_fea_proj = self.audio_face_motion_proj(torch.cat([audio2face_fea, body_hint_face], dim=2))
-        # audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
-        # audio2face_fea_proj = speaker_face_fea_proj + audio2face_fea_proj
-        face_proj = self.position_embeddings(speaker_face_fea_proj)
-        decode_face = self.face_motion_decoder(tgt=face_proj.permute(1,0,2), memory=audio2face_fea_proj.permute(1,0,2)).permute(1,0,2)
+        audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
+        audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
+        # audio self attention
+        decode_face_self = self.face_motion_decoder(tgt=audio2face_fea_proj.permute(1,0,2), memory=audio2face_fea_proj.permute(1,0,2)).permute(1,0,2)
+        
+        # audio cross attention
+        decode_face_self = self.position_embeddings(decode_face_self)
+        decode_face = self.face_motion_decoder(tgt=decode_face_self.permute(1,0,2), memory=codebook.permute(1,0,2)).permute(1,0,2)
         face_latent = self.face_out_proj(decode_face)
         classify_face = self.face_cls(face_latent)
-
-        # motion self attn (temporal)
-        masked_motion_proj = self.moton_proj(body_hint_body)
-        masked_motion_proj = self.position_embeddings(masked_motion_proj)
-        masked_motion_proj = speaker_motion_fea_proj + masked_motion_proj
-        motion_fea = self.motion_self_encoder(masked_motion_proj.permute(1,0,2)).permute(1,0,2)
-
-        # audio_cross_attn
         
-        audio2body_fea_proj = self.audio_body_motion_proj(audio2body_fea)
-        # audio2body_fea_proj = self.position_embeddings(audio2body_fea_proj)
-        # audio2body_fea_proj = speaker_motion_fea_proj + audio2body_fea_proj
-        motion_fea = motion_fea + speaker_motion_fea_proj
-        motion_fea = self.position_embeddings(motion_fea)
-        audio2body_fea_cross = self.audio_motion_cross_attn(tgt=motion_fea.permute(1,0,2), memory=audio2body_fea_proj.permute(1,0,2)).permute(1,0,2)
-        if not use_audio:
-          audio2body_fea_cross = audio2body_fea_cross * 0.
-        motion_fea = motion_fea + audio2body_fea_cross 
-
-        # mlp
-        upper_latent = self.motion2latent_upper(motion_fea)
-        hands_latent = self.motion2latent_hands(motion_fea)
-        lower_latent = self.motion2latent_lower(motion_fea)
-
-        # refine
-        motion_upper_refine = self.body_motion_decoder_upper(tgt=upper_latent.permute(1,0,2)+speaker_motion_fea_proj.permute(1,0,2), memory=(hands_latent+lower_latent).permute(1,0,2)).permute(1,0,2)
-        motion_hands_refine = self.body_motion_decoder_hands(tgt=hands_latent.permute(1,0,2)+speaker_motion_fea_proj.permute(1,0,2), memory=(upper_latent+lower_latent).permute(1,0,2)).permute(1,0,2)
-        motion_lower_refine = self.body_motion_decoder_lower(tgt=lower_latent.permute(1,0,2)+speaker_motion_fea_proj.permute(1,0,2), memory=(upper_latent+hands_latent).permute(1,0,2)).permute(1,0,2)
-        upper_latent = self.motion_out_proj_upper(upper_latent + motion_upper_refine)
-        hands_latent = self.motion_out_proj_hands(hands_latent + motion_hands_refine)
-        lower_latent = self.motion_out_proj_lower(lower_latent + motion_lower_refine)
-
-        # decode body
-        classify_upper = self.motion_cls_upper(upper_latent)
-        classify_hands = self.motion_cls_hands(hands_latent)
-        classify_lower = self.motion_cls_lower(lower_latent)
+        # for the codebase runnning
+        upper_latent = torch.zeros_like(face_latent).to(face_latent.device)
+        hands_latent = torch.zeros_like(face_latent).to(face_latent.device)
+        lower_latent = torch.zeros_like(face_latent).to(face_latent.device)
+        classify_upper = torch.zeros_like(classify_face).to(classify_face.device)
+        classify_hands = torch.zeros_like(classify_face).to(classify_face.device)
+        classify_lower = torch.zeros_like(classify_face).to(classify_face.device)
 
         return {
             "rec_face": face_latent,
@@ -387,7 +359,11 @@ class EmageAudioModel(PreTrainedModel):
             audio_slice_len = (end_idx - start_idx)*(16000//30)
             audio_slice = audio[:, start_idx*(16000//30) : start_idx*(16000//30)+audio_slice_len]
             # print(i, audio_slice.shape, speaker_id.shape, window_motion.shape, window_mask.shape)
-            net_out_val = self.forward(audio_slice, speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
+            
+            face_codebook = vq_model.vq_model_face.quantizer.embedding.weight
+            print(face_codebook.shape)
+
+            net_out_val = self.forward(audio_slice, speaker_id, masked_motion=window_motion, mask=window_mask, codebook=face_codebook, use_audio=True)
        
             _, cls_face =  torch.max(F.log_softmax(net_out_val["cls_face"], dim=2), dim=2)
             _, cls_upper =  torch.max(F.log_softmax(net_out_val["cls_upper"], dim=2), dim=2)
