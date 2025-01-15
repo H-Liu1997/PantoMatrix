@@ -28,16 +28,6 @@ from emage_utils import fast_render
 from emage_utils.motion_rep_transfer import get_motion_rep_numpy
 from models.emage_audio import EmageVQVAEConv, EmageVAEConv, EmageVQModel, EmageAudioModel
 
-from flow_matching.path import CondOTProbPath
-
-def skewed_timestep_sample(num_samples: int, device: torch.device) -> torch.Tensor:
-    P_mean = -1.2
-    P_std = 1.2
-    rnd_normal = torch.randn((num_samples,), device=device)
-    sigma = (rnd_normal * P_std + P_mean).exp()
-    time = 1 / (1 + sigma)
-    time = torch.clip(time, min=0.0001, max=1.0)
-    return time
 
 # ---------------------------------  train,val,test fn here --------------------------------- #
 def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
@@ -69,6 +59,13 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
         poses_6d = rc.axis_angle_to_rotation_6d(poses.reshape(bs, t, -1, 3)).reshape(bs, t, -1)
         masked_motion = torch.cat([poses_6d, trans, foot_contact], dim=-1) # bs t 337
 
+        # reconstrcution check
+        # latent_dict = motion_vq.map2latent(poses_6d, expression, tar_contact=foot_contact, tar_trans=trans)
+        # face_latent = latent_dict["face"]
+        # upper_latent = latent_dict["upper"]
+        # lower_latent = latent_dict["lower"]
+        # hands_latent = latent_dict["hands"]
+        # face_index, upper_index, lower_index, hands_index = None, None, None, None
         latent_dict = actual_model.inference(audio, speaker_id, motion_vq, masked_motion=masked_motion)
         face_latent = latent_dict["rec_face"] if cfg.lf > 0 and cfg.cf == 0 else None
         upper_latent = latent_dict["rec_upper"] if cfg.lu > 0 and cfg.cu == 0 else None
@@ -103,6 +100,9 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     time_cost = time.time() - start_time
     print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
     return test_list, save_list
+
+def get_mask(mask, ratio):
+    pass
 
 def get_rec_loss(motion_pred, motion_gt, lu, ll, lh, lf):
     rec_loss_upper = lu * F.mse_loss(motion_pred["rec_upper"], motion_gt["upper"])
@@ -149,31 +149,29 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     latent_index_dict = motion_vq.map2index(motion_gt, expressions_gt, tar_contact = foot_contact, tar_trans = trans)
     latent_dict = motion_vq.map2latent(motion_gt, expressions_gt, tar_contact = foot_contact, tar_trans = trans)
     masked_motion = torch.cat([motion_gt, trans, foot_contact], dim=-1)
+    # forward use audio
     mask = torch.ones_like(masked_motion).to(device)
     mask[:, :cfg.model.seed_frames] = 0
-
-    # if torch.rand(1) < args.class_drop_prob:
-    #     conditioning = {}
-    # else:
-    #     conditioning = {"label": labels}
-
-    # Scaling to [-1, 1] from [0, 1]
-    path = CondOTProbPath()
-    samples = latent_dict["face"] # bs, n, c
-    noise = torch.randn_like(samples).to(device)
-    if cfg.skewed_timesteps:
-        t = skewed_timestep_sample(samples.shape[0], device=device)
-    else:
-        t = torch.torch.rand(samples.shape[0]).to(device)
-    path_sample = path.sample(t=t, x_0=noise, x_1=samples)
-    x_t = path_sample.x_t
-    u_t = path_sample.dx_t
     
-    motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
+    motion_pred = model(audio, speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
     loss_dict = {
-        "face_latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
+        "rec_seed": get_rec_loss(motion_pred, latent_dict, cfg.model.lu, cfg.model.ll, cfg.model.lh, cfg.model.lf),
+        "cls_seed": get_cls_loss(motion_pred, latent_index_dict, cfg.model.cu, cfg.model.cl, cfg.model.ch, cfg.model.cf, kwargs["ClsFn"]),
     }
-   
+  
+    # forward use randon mask and audio
+    mask_ratio = (kwargs["iteration"]/135*400) * 0.95 + 0.05  
+    mask = torch.rand(bs, t, cfg.model.pose_dims+3+4) < mask_ratio
+    mask = mask.float().to(device)
+    motion_pred_random_audio = model(audio, speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
+    loss_dict["rec_audio"] = get_rec_loss(motion_pred_random_audio, latent_dict, cfg.model.lu, cfg.model.ll, cfg.model.lh, cfg.model.lf)
+    loss_dict["cls_audio"] = get_cls_loss(motion_pred_random_audio, latent_index_dict, cfg.model.cu, cfg.model.cl, cfg.model.ch, cfg.model.cf, kwargs["ClsFn"])
+  
+    # forward use random mask
+    motion_pred_random_mask = model(audio, speaker_id, masked_motion=masked_motion, mask=mask, use_audio=False)
+    loss_dict["rec_mask"] = get_rec_loss(motion_pred_random_mask, latent_dict, cfg.model.lu, cfg.model.ll, cfg.model.lh, cfg.model.lf)
+    loss_dict["cls_mask"] = get_cls_loss(motion_pred_random_mask, latent_index_dict, cfg.model.cu, cfg.model.cl, cfg.model.ch, cfg.model.cf, kwargs["ClsFn"])
+    
     all_loss = sum(loss_dict.values())
     loss_dict["all"] = all_loss
   
@@ -184,25 +182,25 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
         kwargs["optimizer"].step()
         kwargs["lr_scheduler"].step()
 
-    # if mode == "val":
-    #     _, cls_face =  torch.max(F.log_softmax(motion_pred["cls_face"], dim=2), dim=2)
-    #     _, cls_upper =  torch.max(F.log_softmax(motion_pred["cls_upper"], dim=2), dim=2)
-    #     _, cls_hands =  torch.max(F.log_softmax(motion_pred["cls_hands"], dim=2), dim=2)
-    #     _, cls_lower =  torch.max(F.log_softmax(motion_pred["cls_lower"], dim=2), dim=2)
-    #     face_latent = motion_pred["rec_face"] if cfg.model.lf > 0 and cfg.model.cf == 0 else None
-    #     upper_latent = motion_pred["rec_upper"] if cfg.model.lu > 0 and cfg.model.cu == 0 else None
-    #     hands_latent = motion_pred["rec_hands"] if cfg.model.lh > 0 and cfg.model.ch == 0 else None
-    #     lower_latent = motion_pred["rec_lower"] if cfg.model.ll > 0 and cfg.model.cl == 0 else None
-    #     face_index = cls_face if cfg.model.cf > 0 else None
-    #     upper_index = cls_upper if cfg.model.cu > 0 else None
-    #     hands_index = cls_hands if cfg.model.ch > 0 else None
-    #     lower_index = cls_lower if cfg.model.cl > 0 else None
-    #     decode_dict = motion_vq.decode(
-    #         face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-    #         face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,)
-    #     motion_pred_rot6d = decode_dict["all_motion4inference"][:, :, :-7]
-    #     # cache feature for evaluation
-    #     kwargs["fgd_evaluator"].update(motion_pred_rot6d, motion_gt)
+    if mode == "val":
+        _, cls_face =  torch.max(F.log_softmax(motion_pred["cls_face"], dim=2), dim=2)
+        _, cls_upper =  torch.max(F.log_softmax(motion_pred["cls_upper"], dim=2), dim=2)
+        _, cls_hands =  torch.max(F.log_softmax(motion_pred["cls_hands"], dim=2), dim=2)
+        _, cls_lower =  torch.max(F.log_softmax(motion_pred["cls_lower"], dim=2), dim=2)
+        face_latent = motion_pred["rec_face"] if cfg.model.lf > 0 and cfg.model.cf == 0 else None
+        upper_latent = motion_pred["rec_upper"] if cfg.model.lu > 0 and cfg.model.cu == 0 else None
+        hands_latent = motion_pred["rec_hands"] if cfg.model.lh > 0 and cfg.model.ch == 0 else None
+        lower_latent = motion_pred["rec_lower"] if cfg.model.ll > 0 and cfg.model.cl == 0 else None
+        face_index = cls_face if cfg.model.cf > 0 else None
+        upper_index = cls_upper if cfg.model.cu > 0 else None
+        hands_index = cls_hands if cfg.model.ch > 0 else None
+        lower_index = cls_lower if cfg.model.cl > 0 else None
+        decode_dict = motion_vq.decode(
+            face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
+            face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,)
+        motion_pred_rot6d = decode_dict["all_motion4inference"][:, :, :-7]
+        # cache feature for evaluation
+        kwargs["fgd_evaluator"].update(motion_pred_rot6d, motion_gt)
     return loss_dict
 
 
@@ -253,7 +251,7 @@ def main(cfg):
     model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True, broadcast_buffers=False)
 
     # optimizer
-    optimizer_cls = torch.optim.AdamW
+    optimizer_cls = torch.optim.Adam
     optimizer = optimizer_cls(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=cfg.solver.learning_rate,
@@ -331,26 +329,26 @@ def main(cfg):
                 if cfg.test: return 0
 
             # validation
-            # if iteration % cfg.validation.validation_steps == 0:
-            #     loss_meters = {}
-            #     loss_meters_val = {}
-            #     fgd_evaluator.reset()
-            #     pbar_val = tqdm(test_loader, leave=True)
+            if iteration % cfg.validation.validation_steps == 0:
+                loss_meters = {}
+                loss_meters_val = {}
+                fgd_evaluator.reset()
+                pbar_val = tqdm(test_loader, leave=True)
 
-            #     data_start_val = time.time()  
-            #     for j, batch in enumerate(pbar_val):
-            #         data_time_val = time.time() - data_start_val
-            #         with torch.no_grad():
-            #             val_loss_dict = train_val_fn(cfg, batch, model, device, mode="val", fgd_evaluator=fgd_evaluator, motion_vq=motion_vq, ClsFn=ClsFn, iteration=iteration)
-            #         net_time_val = time.time() - data_start_val
-            #         val_loss_dict["fgd"] = fgd_evaluator.compute() if j == len(test_loader) - 1 else 0
-            #         log_train_val(cfg, val_loss_dict, local_rank, loss_meters_val, pbar_val, epoch, max_epochs, iteration, net_time_val, data_time_val, optimizer, "Val  ")
-            #         data_start_val = time.time()
-            #         if cfg.debug and j > 1: break
+                data_start_val = time.time()  
+                for j, batch in enumerate(pbar_val):
+                    data_time_val = time.time() - data_start_val
+                    with torch.no_grad():
+                        val_loss_dict = train_val_fn(cfg, batch, model, device, mode="val", fgd_evaluator=fgd_evaluator, motion_vq=motion_vq, ClsFn=ClsFn, iteration=iteration)
+                    net_time_val = time.time() - data_start_val
+                    val_loss_dict["fgd"] = fgd_evaluator.compute() if j == len(test_loader) - 1 else 0
+                    log_train_val(cfg, val_loss_dict, local_rank, loss_meters_val, pbar_val, epoch, max_epochs, iteration, net_time_val, data_time_val, optimizer, "Val  ")
+                    data_start_val = time.time()
+                    if cfg.debug and j > 1: break
 
-            #     if local_rank == 0:
-            #         best_fgd_val, best_fgd_iteration_val = save_last_and_best_ckpt(
-            #             model, optimizer, lr_scheduler, iteration, experiment_ckpt_dir, best_fgd_val, best_fgd_iteration_val, val_loss_dict["fgd"], lower_is_better=True, mertic_name="fgd")
+                if local_rank == 0:
+                    best_fgd_val, best_fgd_iteration_val = save_last_and_best_ckpt(
+                        model, optimizer, lr_scheduler, iteration, experiment_ckpt_dir, best_fgd_val, best_fgd_iteration_val, val_loss_dict["fgd"], lower_is_better=True, mertic_name="fgd")
 
             # train
             data_time = time.time() - data_start
