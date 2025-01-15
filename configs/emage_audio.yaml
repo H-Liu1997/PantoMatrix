@@ -60,7 +60,7 @@ model:
  
 validation:
   validation_steps: 500
-  test_steps: 1000
+  test_steps: 5000
   visualization: False
   evaluation: False
   wandb: False

@@ -10,7 +10,137 @@ from .processing_emage_audio import Quantizer, VQEncoderV5, VQDecoderV5, WavEnco
 from torch import Tensor
 from torchdiffeq import odeint
 from typing import Callable, Optional, Sequence, Tuple, Union
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, BertTokenizer, BertModel, Wav2Vec2Model, Wav2Vec2Config
 
+
+def audio_to_time_aligned_text_features(inputs, processor, model, tokenizer, bert_model):
+    with torch.no_grad():
+        logits = model(inputs.input_values).logits  # shape: (1, time_steps, vocab_size)
+
+    predicted_ids_per_timestep = torch.argmax(logits, dim=-1)  # shape: (1, time_steps)
+    predicted_ids_per_timestep = predicted_ids_per_timestep[0].cpu().numpy()
+    vocab = processor.tokenizer.get_vocab()
+    id_to_token = {v: k for k, v in vocab.items()}
+    tokens_per_timestep = [id_to_token[id] for id in predicted_ids_per_timestep]
+
+    predicted_ids = torch.argmax(logits, dim=-1)
+    transcription = processor.decode(predicted_ids[0])
+    inputs_bert = tokenizer(transcription, return_tensors="pt")
+    input_ids = inputs_bert["input_ids"][0]
+    tokens_bert = tokenizer.convert_ids_to_tokens(input_ids)
+
+    with torch.no_grad():
+        outputs_bert = bert_model(**inputs_bert.to(inputs.input_values.device))
+    all_token_embeddings = outputs_bert.last_hidden_state[0]
+    per_timestep_chars = []
+    per_timestep_char_indices = []
+    for idx, t in enumerate(tokens_per_timestep):
+        if t not in ("<pad>", "|"):
+            per_timestep_chars.append(t.lower())
+            per_timestep_char_indices.append(idx)
+    bert_chars = []
+    bert_char_indices = []
+    for idx, token in enumerate(tokens_bert):
+        if token in ("[CLS]", "[SEP]"):
+            continue
+        token_str = token.replace("##", "")
+        for c in token_str:
+            bert_chars.append(c)
+            bert_char_indices.append(idx)
+
+    s = difflib.SequenceMatcher(None, per_timestep_chars, bert_chars)
+    opcodes = s.get_opcodes()
+    per_timestep_to_bert_token_idx = {}
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            for k in range(i2 - i1):
+                per_timestep_idx = per_timestep_char_indices[i1 + k]
+                bert_token_idx = bert_char_indices[j1 + k]
+                per_timestep_to_bert_token_idx[per_timestep_idx] = bert_token_idx
+    features_per_timestep = []
+    check = []
+    for i, per_token in enumerate(tokens_per_timestep):
+        if i == 0:
+            embedding = all_token_embeddings[0]
+            check.append("cls")
+        elif per_token in ("<pad>", "|"):
+            embedding = torch.zeros(all_token_embeddings.shape[-1]).to(inputs.input_values.device)
+            check.append(0)
+        else:
+            if i in per_timestep_to_bert_token_idx:
+                bert_idx = per_timestep_to_bert_token_idx[i]
+                embedding = all_token_embeddings[bert_idx]
+                check.append(tokens_bert[bert_idx])
+            else:
+                embedding = torch.zeros(all_token_embeddings.shape[-1]).to(inputs.input_values.device)
+                check.append(0)
+        features_per_timestep.append(embedding)
+    features_per_timestep = torch.stack(features_per_timestep)
+
+    updated_check = check.copy()
+    for i in range(len(check)):
+        if check[i] == 0:
+            left = i - 1
+            right = i + 1
+            left_found = False
+            right_found = False
+
+            while left >= 0:
+                if check[left] != 0:
+                    left_found = True
+                    break
+                left -= 1
+
+            while right < len(check):
+                if check[right] != 0:
+                    right_found = True
+                    break
+                right += 1
+
+            if left_found and right_found:
+                if (i - left) <= (right - i):
+                    nearest = left
+                else:
+                    nearest = right
+            elif left_found:
+                nearest = left
+            elif right_found:
+                nearest = right
+            else:
+                continue
+            updated_check[i] = updated_check[nearest]
+            features_per_timestep[i] = features_per_timestep[nearest]
+    features_per_timestep = features_per_timestep.unsqueeze(0)
+    return transcription, features_per_timestep, all_token_embeddings
+
+class WrapedWav2Vec(nn.Module):
+    def __init__(self, layers=1):
+        super(WrapedWav2Vec, self).__init__()
+        self.feature_extractor = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h").feature_extractor
+        self.feature_projection = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h").feature_projection
+        self.encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h").encoder
+        self.encoder.layers = self.encoder.layers[:layers]
+
+    def forward(
+        self,
+        inputs,
+        attention_mask: Optional[torch.Tensor] = None,
+        mask_time_indices: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ):
+        finetune_audio_low = self.feature_extractor(inputs).transpose(1, 2)
+        hidden_states, _ = self.feature_projection(finetune_audio_low.detach())
+        encoder_outputs = self.encoder(
+            hidden_states,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        hidden_states = encoder_outputs[0]
+        return {"low_level": finetune_audio_low, "high_level": hidden_states}
 
 def inverse_selection_tensor(filtered_t, selection_array, n):
     selection_array = torch.from_numpy(selection_array).cuda()
@@ -247,7 +377,9 @@ class EmageAudioModel(PreTrainedModel):
         super().__init__(config)
         self.cfg = config
         # audio encoder
-        self.audio_encoder_face = WavEncoder(self.cfg.audio_f)
+        # self.audio_encoder_face = WavEncoder(self.cfg.audio_f)
+        self.audio_encoder_face = WrapedWav2Vec(layers=4)        
+        self.audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
         # speaker id
         self.speaker_embedding_face = nn.Embedding(self.cfg.speaker_dims, self.cfg.hidden_size)
         # mask embedding
@@ -256,7 +388,8 @@ class EmageAudioModel(PreTrainedModel):
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
         self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
-        self.audio_face_motion_proj = nn.Linear(self.cfg.audio_f + self.cfg.vae_codebook_size, self.cfg.hidden_size)
+        self.input_up = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
+        self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size*2, self.cfg.hidden_size)
         self.face_motion_decoder = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
         self.face_motion_decoder_2 = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
         # self.face_motion_decoder = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.hidden_size)
@@ -270,9 +403,13 @@ class EmageAudioModel(PreTrainedModel):
             )
         
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
-        
-        audio2face_fea = self.audio_encoder_face(audio)
-        bs, n, _ = audio2face_fea.shape
+        audio_list = [i.cpu().numpy() for i in audio]
+        inputs = self.audio_processor(audio_list, sampling_rate=16000, return_tensors="pt", padding=True).to(audio.device)
+        audio2face_fea = self.audio_encoder_face(inputs.input_values)["high_level"]
+        audio2face_fea = F.interpolate(audio2face_fea.transpose(1, 2), scale_factor=245 / 400, mode="linear", align_corners=True).transpose(1, 2)
+        bs, n, _ = x.shape
+        if audio2face_fea.shape[1] > n:
+          audio2face_fea = audio2face_fea[:, :n]
         
         if t.dim() == 0:
             t = t.unsqueeze(0)
@@ -282,8 +419,9 @@ class EmageAudioModel(PreTrainedModel):
         time_emb = time_emb.unsqueeze(1).repeat(1,n,1)
         emb = self.time_embed(time_emb)
         # print(emb.shape, audio2face_fea.shape)
-
         # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
+        
+        x = self.input_up(x)
         fuse_fea = torch.cat([audio2face_fea, x,], dim=2)
         audio2face_fea_proj = self.audio_face_motion_proj(fuse_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
@@ -326,7 +464,6 @@ class EmageAudioModel(PreTrainedModel):
         #     return sol
         # else:
         #     return sol[-1]
-        
         face_latent = sol[-1]
         upper_latent = torch.zeros_like(face_latent).to(face_latent.device)
         hands_latent = torch.zeros_like(face_latent).to(face_latent.device)
