@@ -33,6 +33,8 @@ pyglet
 # mmdet==3.2.0
 # mmpose==0.28.0
 eval_type_backport
+torchdiffeq
+flow-matching
 
 wget
 gradio==4.44.1
@@ -50,7 +52,7 @@ torchvision
 moviepy==1.0.3
 igraph
 ConfigArgParse
-librosa
+librosa==0.9.0
 
 numpy==1.23.5
 wandb
