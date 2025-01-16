@@ -391,7 +391,7 @@ class EmageAudioModel(PreTrainedModel):
         self.input_up = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
         self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size)
         self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
-        self.face_motion_cross_time = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=2)
+        # self.face_motion_cross_time = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=2)
         # self.face_motion_decoder = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.hidden_size)
         self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
@@ -416,17 +416,17 @@ class EmageAudioModel(PreTrainedModel):
         # print(t.shape)      
         time_emb = timestep_embedding(t, self.cfg.hidden_size).to(audio)
         # print(time_emb.shape)
-        time_emb = time_emb.unsqueeze(1).repeat(1,1,1)
+        time_emb = time_emb.unsqueeze(1).repeat(1,n,1)
         emb = self.time_embed(time_emb)
         # print(emb.shape, audio2face_fea.shape)
         # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
         x = self.input_up(x)
         x = self.position_embeddings(x)
+        x = x + emb
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
+        audio2face_fea_proj = audio2face_fea_proj + emb
         decode_face = self.face_motion_cross_audio(tgt=x.permute(1,0,2), memory=audio2face_fea_proj.permute(1,0,2)).permute(1,0,2)
-        decode_face = self.position_embeddings(decode_face)
-        decode_face = self.face_motion_cross_time(tgt=decode_face.permute(1,0,2), memory=emb.permute(1,0,2)).permute(1,0,2)
         face_latent = self.face_out_proj(decode_face)
         return face_latent
 
