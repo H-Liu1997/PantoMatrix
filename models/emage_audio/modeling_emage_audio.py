@@ -13,6 +13,197 @@ from typing import Callable, Optional, Sequence, Tuple, Union
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, BertTokenizer, BertModel, Wav2Vec2Model, Wav2Vec2Config
 
 
+# class TimestepEncoding(nn.Module):
+#     def __init__(self, embedding_dim: int):
+#         super().__init__()
+
+#         # Fourier embedding
+#         half_dim = embedding_dim // 2
+#         emb = math.log(10000) / (half_dim - 1)
+#         emb = torch.exp(torch.arange(half_dim) * -emb)
+#         self.register_buffer("emb", emb)
+
+#         # encoding
+#         self.encoding = nn.Sequential(
+#             nn.Linear(embedding_dim, 4 * embedding_dim),
+#             nn.Mish(),
+#             nn.Linear(4 * embedding_dim, embedding_dim),
+#         )
+
+#     def forward(self, t: torch.Tensor):
+#         """
+#         :param t: B-dimensional tensor containing timesteps in range [0, 1]
+#         :return: B x embedding_dim tensor containing timestep encodings
+#         """
+#         x = t[:, None] * self.emb[None, :]
+#         x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+#         x = self.encoding(x)
+#         return x
+
+
+class FiLM(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+        self.film = nn.Sequential(nn.Mish(), nn.Linear(dim, dim * 2))
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor):
+        """
+        :param x: ... x dim tensor
+        :param cond: ... x dim tensor
+        :return: ... x dim tensor as scale(cond) * x + bias(cond)
+        """
+        cond = self.film(cond)
+        scale, bias = torch.chunk(cond, chunks=2, dim=-1)
+        x = (scale + 1) * x + bias
+        return x
+
+
+class FeedforwardBlock(nn.Module):
+    def __init__(self, d_model: int, d_feedforward: int = 1024, dropout: float = 0.1):
+        super().__init__()
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_feedforward),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(d_feedforward, d_model),
+            nn.Dropout(p=dropout),
+        )
+
+    def forward(self, x: torch.Tensor):
+        """
+        :param x: ... x d_model tensor
+        :return: ... x d_model tensor
+        """
+        return self.ff(x)
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout=dropout, batch_first=True
+        )
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: torch.Tensor = None,
+        key_padding_mask: torch.Tensor = None,
+    ):
+        """
+        :param x: B x T x d_model input tensor
+        :param attn_mask: B * num_heads x L x S mask with L=target sequence length, S=source sequence length
+                          for a float mask: values will be added to attention weight
+                          for a binary mask: True indicates that the element is not allowed to attend
+        :param key_padding_mask: B x S mask
+                          for a float mask: values will be added directly to the corresponding key values
+                          for a binary mask: True indicates that the corresponding key value will be ignored
+        :return: B x T x d_model output tensor
+        """
+        x = self.self_attn(
+            x,
+            x,
+            x,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )[0]
+        x = self.dropout(x)
+        return x
+
+
+class CrossAttention(nn.Module):
+    def __init__(self, d_model: int, d_cond: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(
+            d_model,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
+            kdim=d_cond,
+            vdim=d_cond,
+        )
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cond: torch.Tensor,
+        attn_mask: torch.Tensor = None,
+        key_padding_mask: torch.Tensor = None,
+    ):
+        """
+        :param x: B x T_target x d_model input tensor
+        :param cond: B x T_cond x d_cond condition tensor
+        :param attn_mask: B * num_heads x L x S mask with L=target sequence length, S=source sequence length
+                          for a float mask: values will be added to attention weight
+                          for a binary mask: True indicates that the element is not allowed to attend
+        :param key_padding_mask: B x S mask
+                          for a float mask: values will be added directly to the corresponding key values
+                          for a binary mask: True indicates that the corresponding key value will be ignored
+        :return: B x T x d_model output tensor
+        """
+        x = self.cross_attn(
+            x,
+            cond,
+            cond,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )[0]
+        x = self.dropout(x)
+        return x
+
+
+class FilmTransformerDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        d_cond: int,
+        num_heads: int,
+        d_feedforward: int = 1024,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.self_attn = SelfAttention(d_model, num_heads, dropout)
+        self.film1 = FiLM(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.cross_attn = CrossAttention(d_model, d_cond, num_heads, dropout)
+        self.film2 = FiLM(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.feedforward = FeedforwardBlock(d_model, d_feedforward, dropout)
+        self.film3 = FiLM(d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cross_cond: torch.Tensor,
+        film_cond: torch.Tensor,
+        target_mask: torch.Tensor = None,
+        target_key_padding_mask: torch.Tensor = None,
+        cross_cond_mask: torch.Tensor = None,
+        cross_cond_key_padding_mask: torch.Tensor = None,
+    ):
+        """
+        :param x: B x T x d_model tensor
+        :param cross_cond: B x T x d_cond tensor containing the conditioning input to cross attention layers
+        :param film_cond: B x [1 or T] x film_cond tensor containing the conditioning input to FiLM layers
+        :return: B x T x d_model tensor
+        """
+        x1 = self.self_attn(self.norm1(x), target_mask, target_key_padding_mask)
+        x = x + self.film1(x1, film_cond)
+        x2 = self.cross_attn(
+            self.norm2(x), cross_cond, cross_cond_mask, cross_cond_key_padding_mask
+        )
+        x = x + self.film2(x2, film_cond)
+        x3 = self.feedforward(self.norm3(x))
+        x = x + self.film3(x3, film_cond)
+        return x
+
+
 def audio_to_time_aligned_text_features(inputs, processor, model, tokenizer, bert_model):
     with torch.no_grad():
         logits = model(inputs.input_values).logits  # shape: (1, time_steps, vocab_size)
@@ -386,11 +577,19 @@ class EmageAudioModel(PreTrainedModel):
         # self.speaker_embedding_face = nn.Parameter(torch.zeros(1,self.cfg.pose_length,self.cfg.hidden_size))
         # nn.init.normal_(self.speaker_embedding_face, 0, self.cfg.hidden_size**-0.5)
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
-        self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
+        # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
         self.input_up = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
         self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size)
-        self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
+        # self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
+        self.face_motion_cross_audio = nn.ModuleList(
+            [
+                FilmTransformerDecoderLayer(
+                    self.cfg.hidden_size, self.cfg.hidden_size, 4, self.cfg.hidden_size*2, 0.1
+                )
+                for _ in range(4)
+            ]
+        ) 
         # self.face_motion_cross_time = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=2)
         # self.face_motion_decoder = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.hidden_size)
         self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
@@ -422,11 +621,17 @@ class EmageAudioModel(PreTrainedModel):
         # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
         x = self.input_up(x)
         x = self.position_embeddings(x)
-        x = x + emb
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
-        audio2face_fea_proj = audio2face_fea_proj + emb
-        decode_face = self.face_motion_cross_audio(tgt=x.permute(1,0,2), memory=audio2face_fea_proj.permute(1,0,2)).permute(1,0,2)
+        decode_face = x
+        # decode_face = self.face_motion_cross_audio(x, audio2face_fea_proj, emb)
+        for decoder_layer in self.face_motion_cross_audio:
+            decode_face = decoder_layer(
+                decode_face,
+                audio2face_fea_proj,
+                emb,
+            )
+
         face_latent = self.face_out_proj(decode_face)
         return face_latent
 
@@ -652,13 +857,3 @@ class EmageAudioModel(PreTrainedModel):
             "cls_hands": cls_all_hands,
             "cls_lower": cls_all_lower,
         }
-
-
-
-
-
-
-
-
-
-
