@@ -13,32 +13,32 @@ from typing import Callable, Optional, Sequence, Tuple, Union
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, BertTokenizer, BertModel, Wav2Vec2Model, Wav2Vec2Config
 
 
-# class TimestepEncoding(nn.Module):
-#     def __init__(self, embedding_dim: int):
-#         super().__init__()
+class TimestepEncoding(nn.Module):
+    def __init__(self, embedding_dim: int):
+        super().__init__()
 
-#         # Fourier embedding
-#         half_dim = embedding_dim // 2
-#         emb = math.log(10000) / (half_dim - 1)
-#         emb = torch.exp(torch.arange(half_dim) * -emb)
-#         self.register_buffer("emb", emb)
+        # Fourier embedding
+        half_dim = embedding_dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim) * -emb)
+        self.register_buffer("emb", emb)
 
-#         # encoding
-#         self.encoding = nn.Sequential(
-#             nn.Linear(embedding_dim, 4 * embedding_dim),
-#             nn.Mish(),
-#             nn.Linear(4 * embedding_dim, embedding_dim),
-#         )
+        # encoding
+        self.encoding = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.Mish(),
+            nn.Linear(embedding_dim, embedding_dim),
+        )
 
-#     def forward(self, t: torch.Tensor):
-#         """
-#         :param t: B-dimensional tensor containing timesteps in range [0, 1]
-#         :return: B x embedding_dim tensor containing timestep encodings
-#         """
-#         x = t[:, None] * self.emb[None, :]
-#         x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
-#         x = self.encoding(x)
-#         return x
+    def forward(self, t: torch.Tensor):
+        """
+        :param t: B-dimensional tensor containing timesteps in range [0, 1]
+        :return: B x embedding_dim tensor containing timestep encodings
+        """
+        x = t[:, None] * self.emb[None, :]
+        x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+        x = self.encoding(x)
+        return x
 
 
 class FiLM(nn.Module):
@@ -528,38 +528,7 @@ class EmageVQModel(nn.Module):
         rec_y_trans = rec_trans_v_s[:,:,1:2]
         global_motion = torch.cat([rec_x_trans, rec_y_trans, rec_z_trans], dim=-1)
         return global_motion
-
-def timestep_embedding(timesteps, dim, max_period=10000):
-    """
-    Create sinusoidal timestep embeddings.
-    :param timesteps: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an [N x dim] Tensor of positional embeddings.
-    """
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-    ).to(device=timesteps.device)
-    args = timesteps[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    return embedding
-
-def get_time_discretization(nfes: int, rho=7):
-    step_indices = torch.arange(nfes, dtype=torch.float64)
-    sigma_min = 0.002
-    sigma_max = 80.0
-    sigma_vec = (
-        sigma_max ** (1 / rho)
-        + step_indices / (nfes - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
-    ) ** rho
-    sigma_vec = torch.cat([sigma_vec, torch.zeros_like(sigma_vec[:1])])
-    time_vec = (sigma_vec / (1 + sigma_vec)).squeeze()
-    t_samples = 1.0 - torch.clip(time_vec, min=0.0, max=1.0)
-    return t_samples
+    
 
 class EmageAudioModel(PreTrainedModel):
     config_class = EmageAudioConfig
@@ -590,16 +559,9 @@ class EmageAudioModel(PreTrainedModel):
                 for _ in range(4)
             ]
         ) 
-        # self.face_motion_cross_time = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=2)
-        # self.face_motion_decoder = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.hidden_size)
         self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
-        
-        self.time_embed = nn.Sequential(
-                nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size),
-                nn.SiLU(),
-                nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size),
-            )
+        self.time_embed = TimestepEncoding(self.cfg.hidden_size)
         
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
         audio_list = [i.cpu().numpy() for i in audio]
@@ -612,11 +574,8 @@ class EmageAudioModel(PreTrainedModel):
         
         if t.dim() == 0:
             t = t.unsqueeze(0)
-        # print(t.shape)      
-        time_emb = timestep_embedding(t, self.cfg.hidden_size).to(audio)
-        # print(time_emb.shape)
-        time_emb = time_emb.unsqueeze(1).repeat(1,n,1)
-        emb = self.time_embed(time_emb)
+        # print(t)      
+        emb = self.time_embed(t).unsqueeze(1).repeat(1,n,1)
         # print(emb.shape, audio2face_fea.shape)
         # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
         x = self.input_up(x)
@@ -631,7 +590,6 @@ class EmageAudioModel(PreTrainedModel):
                 audio2face_fea_proj,
                 emb,
             )
-
         face_latent = self.face_out_proj(decode_face)
         return face_latent
 
@@ -689,10 +647,7 @@ class EmageAudioModel(PreTrainedModel):
     
         
     def inference(self, audio, speaker_id, vq_model, masked_motion=None, mask=None):
-        if self.cfg.edm_schedule:
-            time_grid = get_time_discretization(nfes=self.cfg.ode_nfe)
-        else:
-            time_grid = torch.tensor([0.0, 1.0], device=audio.device)
+        time_grid = torch.tensor([0.0, 1.0], device=audio.device)
     
         # generate default mask and masked motion if not provided
         length = audio.shape[1] * 30 // 16000
