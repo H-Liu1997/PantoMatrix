@@ -169,8 +169,11 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     x_t = path_sample.x_t
     u_t = path_sample.dx_t
     
-    motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
+    output = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
+    motion_pred = output["face_flow"]
+    motion_x0 = output["face_x0"]
     loss_dict = {
+        "face_rec": torch.pow(motion_x0 - samples, 2).mean(),
         "face_latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
     }
    

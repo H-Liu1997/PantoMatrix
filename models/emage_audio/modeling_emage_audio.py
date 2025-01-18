@@ -559,11 +559,12 @@ class EmageAudioModel(PreTrainedModel):
                 for _ in range(4)
             ]
         ) 
-        self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
-        self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
+        # self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
+        self.face_out_mlp = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
+        self.face_out_x0_mlp = MLP(self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.time_embed = TimestepEncoding(self.cfg.hidden_size)
         
-    def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
+    def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True, train=False):
         audio_list = [i.cpu().numpy() for i in audio]
         inputs = self.audio_processor(audio_list, sampling_rate=16000, return_tensors="pt", padding=True).to(audio.device)
         audio2face_fea = self.audio_encoder_face(inputs.input_values)["high_level"]
@@ -590,7 +591,13 @@ class EmageAudioModel(PreTrainedModel):
                 audio2face_fea_proj,
                 emb,
             )
-        face_latent = self.face_out_proj(decode_face)
+        face_latent = self.face_out_mlp(decode_face)
+        if train:
+            face_x0 = self.face_out_x0_mlp(decode_face)
+            return {
+                "face_x0": face_x0,
+                "face_flow": face_latent,
+            }
         return face_latent
 
     def sample(
