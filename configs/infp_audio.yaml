@@ -1,4 +1,4 @@
-wandb_project: 'EMAGE++'
+wandb_project: 'infp'
 exp_name: 'debug'
 debug: False
 wandb_entity: 'liu1997'
@@ -15,9 +15,9 @@ data:
   class_name: "BEAT2DatasetEamgeFootContact"
   train_bs: 56
   meta_paths:
-    - "./datasets/data_json/beat2_s20_l64_speaker2.json"
+    - "./datasets/data_json/infp_s20_l64_test3.json"
   test_meta_paths: 
-    - "./datasets/data_json/beat2_s20_l64_speaker2.json"
+    - "./datasets/data_json/infp_s20_l64_test3.json"
   pose_norm: False
   
 skewed_timesteps: False

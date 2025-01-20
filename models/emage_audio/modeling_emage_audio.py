@@ -627,36 +627,35 @@ class EmageAudioModel(PreTrainedModel):
         # else:
         #     return sol[-1]
         face_latent = sol[-1]
-        upper_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        hands_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        lower_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        classify_upper = torch.zeros_like(face_latent).to(face_latent.device)
-        classify_hands = torch.zeros_like(face_latent).to(face_latent.device)
-        classify_lower = torch.zeros_like(face_latent).to(face_latent.device)
-        classify_face = torch.zeros_like(face_latent).to(face_latent.device)
-        return  {
-            "rec_face": face_latent,
-            "rec_upper": upper_latent,
-            "rec_hands": hands_latent,
-            "rec_lower": lower_latent,
-            "cls_face": classify_face,
-            "cls_upper": classify_upper,
-            "cls_hands": classify_hands,
-            "cls_lower": classify_lower,
-        }
+        return face_latent
+        # upper_latent = torch.zeros_like(face_latent).to(face_latent.device)
+        # hands_latent = torch.zeros_like(face_latent).to(face_latent.device)
+        # lower_latent = torch.zeros_like(face_latent).to(face_latent.device)
+        # classify_upper = torch.zeros_like(face_latent).to(face_latent.device)
+        # classify_hands = torch.zeros_like(face_latent).to(face_latent.device)
+        # classify_lower = torch.zeros_like(face_latent).to(face_latent.device)
+        # classify_face = torch.zeros_like(face_latent).to(face_latent.device)
+        # return  {
+        #     "rec_face": face_latent,
+        #     "rec_upper": upper_latent,
+        #     "rec_hands": hands_latent,
+        #     "rec_lower": lower_latent,
+        #     "cls_face": classify_face,
+        #     "cls_upper": classify_upper,
+        #     "cls_hands": classify_hands,
+        #     "cls_lower": classify_lower,
+        # }
     
         
-    def inference(self, audio, speaker_id, vq_model, masked_motion=None, mask=None):
+    def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None):
         time_grid = torch.tensor([0.0, 1.0], device=audio.device)
     
         # generate default mask and masked motion if not provided
-        length = audio.shape[1] * 30 // 16000
+        # length = audio.shape[1] * 30 // 16000
+        length = masked_motion.shape[1]
         bs = audio.shape[0]
-
-        fake_axis_angle = torch.zeros(bs, length, 55, 3).to(audio.device)
-        fake_motion = axis_angle_to_rotation_6d(fake_axis_angle).reshape(bs, length, -1)
-        fake_foot_and_trans = torch.zeros(bs, length, 7).to(audio.device)
-        fake_motion = torch.cat([fake_motion, fake_foot_and_trans], dim=-1) 
+        # print(length, masked_motion.shape)
+        fake_motion = torch.zeros(bs, length, self.cfg.vae_codebook_size).to(audio.device)
         if masked_motion is not None:
             fake_motion[:, :masked_motion.shape[1]] = masked_motion 
         masked_motion = fake_motion
@@ -665,8 +664,6 @@ class EmageAudioModel(PreTrainedModel):
         if mask is not None:
             fake_mask[:, :mask.shape[1]] = mask 
         mask = fake_mask
-
-        # print(length, masked_motion.shape, mask.shape)
         # Autoregressive inference
         bs, total_len, c = masked_motion.shape
         window = self.cfg.pose_length
@@ -675,13 +672,6 @@ class EmageAudioModel(PreTrainedModel):
         remain = (total_len - pre_frames) % (window - pre_frames)
         
         rec_all_face = []
-        rec_all_lower = []
-        rec_all_upper = []
-        rec_all_hands = []
-        cls_all_face = []
-        cls_all_lower = []
-        cls_all_upper = []
-        cls_all_hands = []
         
         last_motion = masked_motion[:, :pre_frames, :]
         for i in range(rounds):
@@ -704,42 +694,16 @@ class EmageAudioModel(PreTrainedModel):
             bs, t, _ = window_mask.shape
             x_init = torch.randn((bs, t, 256), dtype=torch.float32, device=window_mask.device)
             # print(self.cfg.ode_step_size)
-            net_out_val = self.sample(
+            face_latent = self.sample(
                 x_init, step_size=self.cfg.ode_step_size,
                 atol=self.cfg.ode_atol,
                 rtol=self.cfg.ode_rtol,
                 time_grid=time_grid,
                 audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
-       
-            _, cls_face =  torch.max(F.log_softmax(net_out_val["cls_face"], dim=2), dim=2)
-            _, cls_upper =  torch.max(F.log_softmax(net_out_val["cls_upper"], dim=2), dim=2)
-            _, cls_hands =  torch.max(F.log_softmax(net_out_val["cls_hands"], dim=2), dim=2)
-            _, cls_lower =  torch.max(F.log_softmax(net_out_val["cls_lower"], dim=2), dim=2)
-
-            face_latent = net_out_val["rec_face"] if self.cfg.lf > 0 and self.cfg.cf == 0 else None
-            upper_latent = net_out_val["rec_upper"] if self.cfg.lu > 0 and self.cfg.cu == 0 else None
-            hands_latent = net_out_val["rec_hands"] if self.cfg.lh > 0 and self.cfg.ch == 0 else None
-            lower_latent = net_out_val["rec_lower"] if self.cfg.ll > 0 and self.cfg.cl == 0 else None
-            face_index = cls_face if self.cfg.cf > 0 else None
-            upper_index = cls_upper if self.cfg.cu > 0 else None
-            hands_index = cls_hands if self.cfg.ch > 0 else None
-            lower_index = cls_lower if self.cfg.cl > 0 else None
-
-            decode_dict = vq_model.decode(
-            face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-            face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,)
             
-            # decode_dict = vq_model.decode(face_latent=net_out_val["rec_face"], upper_index=net_out_val["cls_upper"], hands_index=net_out_val["cls_hands"], lower_index=net_out_val["cls_lower"])
-            
-            last_motion = decode_dict["all_motion4inference"][:, -pre_frames:, :]
-            rec_all_face.append(net_out_val["rec_face"][:, :-pre_frames, :])
-            rec_all_upper.append(net_out_val["rec_upper"][:, :-pre_frames, :])
-            rec_all_hands.append(net_out_val["rec_hands"][:, :-pre_frames, :])
-            rec_all_lower.append(net_out_val["rec_lower"][:, :-pre_frames, :])
-            cls_all_face.append(net_out_val["cls_face"][:, :-pre_frames])
-            cls_all_upper.append(net_out_val["cls_upper"][:, :-pre_frames])
-            cls_all_hands.append(net_out_val["cls_hands"][:, :-pre_frames])
-            cls_all_lower.append(net_out_val["cls_lower"][:, :-pre_frames])
+            last_motion = face_latent[:, -pre_frames:, :]
+            rec_all_face.append(face_latent[:, :-pre_frames, :])
+            # print(face_latent[:, :-pre_frames, :].shape)
 
         if remain > pre_frames:
             final_start = rounds*(window - pre_frames)
@@ -759,56 +723,14 @@ class EmageAudioModel(PreTrainedModel):
             bs, t, _ = final_mask.shape
             x_init = torch.randn((bs, t, 256), dtype=torch.float32, device=window_mask.device)
             
-            net_out_val = self.sample(
+            face_latent = self.sample(
                 x_init, step_size=self.cfg.ode_step_size,
                 atol=self.cfg.ode_atol,
                 rtol=self.cfg.ode_rtol,
                 time_grid=time_grid,
                 audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
-
-            _, cls_face =  torch.max(F.log_softmax(net_out_val["cls_face"], dim=2), dim=2)
-            _, cls_upper =  torch.max(F.log_softmax(net_out_val["cls_upper"], dim=2), dim=2)
-            _, cls_hands =  torch.max(F.log_softmax(net_out_val["cls_hands"], dim=2), dim=2)
-            _, cls_lower =  torch.max(F.log_softmax(net_out_val["cls_lower"], dim=2), dim=2)
-
-            face_latent = net_out_val["rec_face"] if self.cfg.lf > 0 and self.cfg.cf == 0 else None
-            upper_latent = net_out_val["rec_upper"] if self.cfg.lu > 0 and self.cfg.cu == 0 else None
-            hands_latent = net_out_val["rec_hands"] if self.cfg.lh > 0 and self.cfg.ch == 0 else None
-            lower_latent = net_out_val["rec_lower"] if self.cfg.ll > 0 and self.cfg.cl == 0 else None
-            face_index = cls_face if self.cfg.cf > 0 else None
-            upper_index = cls_upper if self.cfg.cu > 0 else None
-            hands_index = cls_hands if self.cfg.ch > 0 else None
-            lower_index = cls_lower if self.cfg.cl > 0 else None
-
-            decode_dict = vq_model.decode(
-            face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-            face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,)
-
-            rec_all_face.append(net_out_val["rec_face"])
-            rec_all_upper.append(net_out_val["rec_upper"])
-            rec_all_hands.append(net_out_val["rec_hands"])
-            rec_all_lower.append(net_out_val["rec_lower"])
-            cls_all_face.append(net_out_val["cls_face"])
-            cls_all_upper.append(net_out_val["cls_upper"])
-            cls_all_hands.append(net_out_val["cls_hands"])
-            cls_all_lower.append(net_out_val["cls_lower"])
-
+            rec_all_face.append(face_latent)
+            # print(face_latent.shape)
         rec_all_face = torch.cat(rec_all_face, dim=1) 
-        rec_all_upper = torch.cat(rec_all_upper, dim=1) 
-        rec_all_hands = torch.cat(rec_all_hands, dim=1) 
-        rec_all_lower = torch.cat(rec_all_lower, dim=1) 
-        cls_all_face = torch.cat(cls_all_face, dim=1)
-        cls_all_upper = torch.cat(cls_all_upper, dim=1) 
-        cls_all_hands = torch.cat(cls_all_hands, dim=1) 
-        cls_all_lower = torch.cat(cls_all_lower, dim=1) 
-
-        return {
-            "rec_face": rec_all_face,
-            "rec_upper": rec_all_upper,
-            "rec_hands": rec_all_hands,
-            "rec_lower": rec_all_lower,
-            "cls_face": cls_all_face,
-            "cls_upper": cls_all_upper,
-            "cls_hands": cls_all_hands,
-            "cls_lower": cls_all_lower,
-        }
+        # print(rec_all_face.shape)
+        return rec_all_face

@@ -96,34 +96,25 @@ class BEAT2DatasetEamgeFootContact(BEAT2Dataset):
 
     def __getitem__(self, item):
         data_item = self.data_list[item]
-        smplx_data = beat_format_load(data_item["motion_path"], mask=None)
+        motion_dict = np.load(data_item["motion_path"].replace("/content", "/home/weili/haiyang"), allow_pickle=True)
         sdx, edx = data_item["start_idx"], data_item["end_idx"]
-        motion = smplx_data["poses"][sdx:edx]
-        expressions = smplx_data["expressions"][sdx:edx]
-        trans = smplx_data["trans"][sdx:edx]
-        foot_contact = np.load(data_item["motion_path"].replace("smplxflame_30", "footcontact").replace(".npz", ".npy"))[sdx:edx]
-
+        # print(motion["random_data"].shape, sdx, edx)
+        motion = motion_dict["random_data"][sdx:edx]
         SMPLX_FPS = 30
         downsample_factor = SMPLX_FPS // self.fps
         motion = motion[::downsample_factor]
         motion = self.normalize(motion, self.mean, self.std)
         
-        audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
+        audio, _ = librosa.load(data_item["audio_path"].replace("/content", "/home/weili/haiyang"), sr=self.audio_sr)
         sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
         edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()
         audio_tensor = torch.from_numpy(audio).float()
-        expressions_tesnor = torch.from_numpy(expressions).float()
-        trans_tensor = torch.from_numpy(trans).float()
-        foot_contact_tensor = torch.from_numpy(foot_contact).float()
-        # print(trans_tensor.shape, foot_contact_tensor.shape)
+        # print(motion_tensor.shape[]/30, audio_tensor.shape/16000)
 
         return dict(
-            motion=motion_tensor,
+            motion_latent=motion_tensor,
             audio=audio_tensor, 
-            expressions=expressions_tesnor,
-            trans=trans_tensor,
-            foot_contact=foot_contact_tensor,
         )

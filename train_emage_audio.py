@@ -41,7 +41,6 @@ def skewed_timestep_sample(num_samples: int, device: torch.device) -> torch.Tens
 
 # ---------------------------------  train,val,test fn here --------------------------------- #
 def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
-    motion_vq = kwargs["motion_vq"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     actual_model.eval()
     test_list = []
@@ -54,55 +53,30 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     save_list = []
     start_time = time.time()
     total_length = 0
+    test_loss = 0
     for test_file in tqdm(test_list, desc="Testing"):
         audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
         audio = torch.from_numpy(audio).to(device).unsqueeze(0)
         speaker_id = torch.zeros(1,1).to(device).long()
 
         # motion seed
-        motion_data = np.load(test_file["motion_path"], allow_pickle=True)
-        poses = torch.from_numpy(motion_data["poses"]).unsqueeze(0).to(device).float()
-        foot_contact = torch.from_numpy(np.load(test_file["motion_path"].replace("smplxflame_30", "footcontact").replace(".npz", ".npy"))).unsqueeze(0).to(device).float()
-        trans = torch.from_numpy(motion_data["trans"]).unsqueeze(0).to(device).float()
-        expression = torch.from_numpy(motion_data["expressions"]).unsqueeze(0).to(device).float()
-        bs, t, _ = poses.shape
-        poses_6d = rc.axis_angle_to_rotation_6d(poses.reshape(bs, t, -1, 3)).reshape(bs, t, -1)
-        masked_motion = torch.cat([poses_6d, trans, foot_contact], dim=-1) # bs t 337
-
-        latent_dict = actual_model.inference(audio, speaker_id, motion_vq, masked_motion=masked_motion)
-        face_latent = latent_dict["rec_face"] if cfg.lf > 0 and cfg.cf == 0 else None
-        upper_latent = latent_dict["rec_upper"] if cfg.lu > 0 and cfg.cu == 0 else None
-        hands_latent = latent_dict["rec_hands"] if cfg.lh > 0 and cfg.ch == 0 else None
-        lower_latent = latent_dict["rec_lower"] if cfg.ll > 0 and cfg.cl == 0 else None
-        # print(latent_dict["rec_face"].shape,latent_dict["cls_upper"].shape)
-        face_index = torch.max(F.log_softmax(latent_dict["cls_face"], dim=2), dim=2)[1] if cfg.cf > 0 else None
-        upper_index = torch.max(F.log_softmax(latent_dict["cls_upper"], dim=2), dim=2)[1] if cfg.cu > 0 else None
-        hands_index = torch.max(F.log_softmax(latent_dict["cls_hands"], dim=2), dim=2)[1] if cfg.ch > 0 else None
-        lower_index = torch.max(F.log_softmax(latent_dict["cls_lower"], dim=2), dim=2)[1] if cfg.cl > 0 else None
-
-        motion_all = motion_vq.decode(
-            face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-            face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,
-            get_global_motion=True, ref_trans=trans[:,0])
-       
-        motion_pred = motion_all["motion_axis_angle"]
-        t = motion_pred.shape[1]
-        motion_pred = motion_pred.cpu().numpy().reshape(t, -1)
-        expression_pred = motion_all["expression"].cpu().numpy().reshape(t, -1)
-        trans_pred = motion_all["trans"].cpu().numpy().reshape(t, -1)
-        # print(motion_pred.shape, expression_pred.shape, trans_pred.shape)
-        beat_format_save(os.path.join(save_path, f"{test_file['video_id']}_output.npz"), motion_pred, upsample=30//cfg.pose_fps, expressions=expression_pred, trans=trans_pred)
-        save_list.append(
-            {
-                "audio_path": test_file["audio_path"],
-                "motion_path": os.path.join(save_path, f"{test_file['video_id']}_output.npz"),
-                "video_id": test_file["video_id"],
-            }
-        )
+        motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
+        motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
+        bs, t, _ = motion_latent.shape
+        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent)  
+          
+        # calcucate loss
+        current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
+        test_loss += current_loss * t
+        
+        np.save(os.path.join(save_path, f"{test_file['video_id']}_output.npz"), motion_latent_pred.cpu().numpy())
         total_length+=t
+    metrics = {
+        "latent_l1": test_loss.cpu().numpy()/total_length
+    }
     time_cost = time.time() - start_time
     print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
-    return test_list, save_list
+    return test_list, save_list, metrics
 
 def get_rec_loss(motion_pred, motion_gt, lu, ll, lh, lf):
     rec_loss_upper = lu * F.mse_loss(motion_pred["rec_upper"], motion_gt["upper"])
@@ -134,22 +108,15 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     else:
         model.eval()
 
-    motion_vq = kwargs["motion_vq"]
-    motion_gt = batch["motion"].to(device)
     audio = batch["audio"].to(device)
-    expressions_gt = batch["expressions"].to(device)
-    trans = batch["trans"].to(device)
-    foot_contact = batch["foot_contact"].to(device)
+    # audio_lis = batch["audio_lis"].to(device)
+    motion_latent = batch["motion_latent"].to(device)
 
-    bs, t, jc = motion_gt.shape
+    bs, t, jc = motion_latent.shape
     j = jc // 3
     speaker_id = torch.zeros(bs,1).to(device).long()
-    motion_gt = rc.axis_angle_to_rotation_6d(motion_gt.reshape(bs,t,j,3)).reshape(bs, t, j*6)
-   
-    latent_index_dict = motion_vq.map2index(motion_gt, expressions_gt, tar_contact = foot_contact, tar_trans = trans)
-    latent_dict = motion_vq.map2latent(motion_gt, expressions_gt, tar_contact = foot_contact, tar_trans = trans)
-    masked_motion = torch.cat([motion_gt, trans, foot_contact], dim=-1)
-    mask = torch.ones_like(masked_motion).to(device)
+
+    mask = torch.ones_like(motion_latent).to(device)
     mask[:, :cfg.model.seed_frames] = 0
 
     # if torch.rand(1) < args.class_drop_prob:
@@ -159,7 +126,7 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
 
     # Scaling to [-1, 1] from [0, 1]
     path = CondOTProbPath()
-    samples = latent_dict["face"] # bs, n, c
+    samples = motion_latent # bs, n, c
     noise = torch.randn_like(samples).to(device)
     if cfg.skewed_timesteps:
         t = skewed_timestep_sample(samples.shape[0], device=device)
@@ -169,9 +136,9 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     x_t = path_sample.x_t
     u_t = path_sample.dx_t
     
-    motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
+    motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True)
     loss_dict = {
-        "face_latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
+        "latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
     }
    
     all_loss = sum(loss_dict.values())
@@ -323,9 +290,7 @@ def main(cfg):
                 test_save_path = os.path.join(log_dir, f"test_{iteration}")
                 os.makedirs(test_save_path, exist_ok=True)
                 with torch.no_grad():
-                    test_list, save_list = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq)
-                if cfg.validation.evaluation:
-                    metrics = evaluation_fn([True]*55, test_list, save_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device, lvd_evaluator, mse_evaluator)
+                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq)
                 if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
                 if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
                 if cfg.test: return 0
@@ -358,7 +323,6 @@ def main(cfg):
             net_time = time.time() - data_start - data_time
             log_train_val(cfg, loss_dict, local_rank, loss_meters, pbar, epoch, max_epochs, iteration, net_time, data_time, optimizer, "Train")
             data_start = time.time()
-
             iteration += 1
    
         start_step_in_epoch = 0
@@ -487,12 +451,12 @@ def log_test(model, metrics, iteration, best_mertics, best_iteration, cfg, local
                     videos_to_log.append(wandb.Video(os.path.join(video_save_path, filename)))
             if videos_to_log:
                 wandb.log({"test/videos": videos_to_log}, step=iteration)
-        if metrics["fgd"] < best_mertics:
-            best_mertics = metrics["fgd"]
+        if metrics["latent_l1"] < best_mertics:
+            best_mertics = metrics["latent_l1"]
             best_iteration = iteration
             model.module.save_pretrained(os.path.join(experiment_ckpt_dir, "test_best"))
         # print(metrics, best_mertics, best_iteration)
-        message = f"Current Test FGD: {metrics['fgd']:.4f} (Best: {best_mertics:.4f} at iteration {best_iteration})"
+        message = f"Current Test latent_l1: {metrics['latent_l1']:.4f} (Best: {best_mertics:.4f} at iteration {best_iteration})"
         log_metric_with_box(message)
     return best_mertics, best_iteration
 
