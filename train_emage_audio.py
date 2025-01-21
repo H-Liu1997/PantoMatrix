@@ -63,6 +63,7 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
         motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
         motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
         bs, t, _ = motion_latent.shape
+        motion_latent = motion_latent[:,0:1,:].repeat(1,t,1)
         motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent)  
           
         # calcucate loss

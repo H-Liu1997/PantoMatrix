@@ -3,7 +3,8 @@ BEAT2/
 examples/motion/
 emage_evaltools/
 datasets/data_json/
-
+HDTF/
 __pycache__/
 */__pycache__/
 **/__pycache__/
+face_landmarker.task

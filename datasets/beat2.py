@@ -89,30 +89,26 @@ class BEAT2DatasetEamge(BEAT2Dataset):
             trans=trans_tensor,
         )
 
-
 class BEAT2DatasetEamgeFootContact(BEAT2Dataset):
     def __init__(self, cfg, split):
         super().__init__(cfg, split)
 
     def __getitem__(self, item):
         data_item = self.data_list[item]
-        motion_dict = np.load(data_item["motion_path"].replace("/content", "/home/weili/haiyang"), allow_pickle=True)
+        motion_dict = np.load(data_item["motion_path"], allow_pickle=True)
         sdx, edx = data_item["start_idx"], data_item["end_idx"]
-        # print(motion["random_data"].shape, sdx, edx)
+        # print(motion_dict["random_data"].shape, sdx, edx)
         motion = motion_dict["random_data"][sdx:edx]
-        SMPLX_FPS = 30
-        downsample_factor = SMPLX_FPS // self.fps
-        motion = motion[::downsample_factor]
         motion = self.normalize(motion, self.mean, self.std)
-        
-        audio, _ = librosa.load(data_item["audio_path"].replace("/content", "/home/weili/haiyang"), sr=self.audio_sr)
+        SMPLX_FPS = 30
+        audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
         sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
         edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()
         audio_tensor = torch.from_numpy(audio).float()
-        # print(motion_tensor.shape[]/30, audio_tensor.shape/16000)
+        # print(motion_tensor.shape[0]/30, audio_tensor.shape[0]/16000)
 
         return dict(
             motion_latent=motion_tensor,
