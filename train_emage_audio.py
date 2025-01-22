@@ -41,6 +41,7 @@ def skewed_timestep_sample(num_samples: int, device: torch.device) -> torch.Tens
 
 # ---------------------------------  train,val,test fn here --------------------------------- #
 def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
+    train_dataset = kwargs["train_dataset"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     actual_model.eval()
     test_list = []
@@ -63,9 +64,12 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
         motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
         motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
         bs, t, _ = motion_latent.shape
-        motion_latent = motion_latent[:,0:1,:].repeat(1,t,1)
-        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent)  
-          
+        motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
+        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in)  
+        
+        # motion_latent_pred = train_dataset.inverse_normalize(motion=motion_latent_pred,mean=train_dataset.mean,std=train_dataset.std)
+        # motion_latent = train_dataset.inverse_normalize(motion=motion_latent,mean=train_dataset.mean,std=train_dataset.std)
+        
         # calcucate loss
         current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
         test_loss += current_loss * t
@@ -291,7 +295,7 @@ def main(cfg):
                 test_save_path = os.path.join(log_dir, f"test_{iteration}")
                 os.makedirs(test_save_path, exist_ok=True)
                 with torch.no_grad():
-                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq)
+                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, train_dataset=train_dataset)
                 if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
                 if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
                 if cfg.test: return 0

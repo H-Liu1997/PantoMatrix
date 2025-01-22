@@ -1,0 +1,179 @@
+debug: false
+seed: 39 # random seed
+exp_name: head_animator_exps/motion-space-${model.flow_estimator.motion_space}_vgg-${loss.l_w_vgg}_gan-${loss.l_w_gan}_face-${loss.l_w_face}_lr-${optimizer.lr}_facemask-${model.using_hybrid_mask} # name for this experiment in the local run directory and on wandb
+mode: train # mode: one of 'train', 'eval', or 'sample'
+# stage: 2 # the stage of training to start from
+n_epochs: null # the number of epochs to train for; if null, must specify n_examples
+cache_dir: cache 
+ckpt_dir: ${exp_name}/ckpt
+# resume_ckpt: null # the path to a checkpoint to resume training from
+# 1000 B=128
+resume_ckpt: /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_finetune/motion-space-20_vggloss-0.001_ganloss-0_faceloss-5e-05_lr-0.0002_facemask-True/ckpt/epoch=1-step=27500.ckpt # the path to a checkpoint to resume training from
+
+model:
+  module_name: head_animation.audio_head_animator
+  class_name: AudioHeadAnimatorModule
+  pretrained_ckpt: /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_finetune/motion-space-20_vggloss-0.001_ganloss-0_faceloss-5e-05_lr-0.0002_facemask-True/ckpt/epoch=1-step=27500.ckpt # the path to a checkpoint to resume training from
+  using_hybrid_mask: True
+  dtype: torch.float32
+  
+  motion_generator:
+    module_name: motion_generation.motion_gen
+    class_name: INFPDiffusionTransformer
+  motion_gen_ckpt: /home/weili/xiaolong/real-time-video-gen/outputs/ckpt/motion_gen_xiaolong_lr1e-4_without_dummpy/epoch=0-step=44400.ckpt
+
+  motion_encoder:
+    module_name: head_animation.LIA.motion_encoder 
+    class_name: MotionEncoder
+    latent_dim: 512
+    size: ${data.train_width}
+
+  flow_estimator:
+    module_name: head_animation.LIA.flow_estimator
+    class_name: FlowEstimator
+    latent_dim: ${model.motion_encoder.latent_dim}
+    motion_space: 20
+
+  face_encoder:
+    module_name: head_animation.LIA.face_encoder
+    class_name: FaceEncoder
+    output_channels: ${model.motion_encoder.latent_dim}
+
+  face_generator:
+    module_name: head_animation.LIA.face_generator
+    class_name: FaceGenerator
+    size: ${data.train_width}
+    latent_dim: ${model.motion_encoder.latent_dim}
+
+  discriminator:
+    module_name: head_animation.LIA.discriminator
+    class_name: Discriminator
+    size: ${data.train_width}
+    
+# loss settings
+loss:
+  l_w_recon: 1
+  l_w_vgg: 1e-3
+  l_w_gan: 1e-5
+  l_w_face: 1
+
+# optimizer settings
+optimizer:
+  lr: 2e-4 # the learning rate
+  warmup_steps: 0 # number of linear warmup steps for the learning rate
+  adam_beta1: 0.9 # beta1 for the Adam optimizer
+  adam_beta2: 0.999 # beta2 for the Adam optimizer
+  adam_epsilon: 1.0e-08 # epsilon for the Adam optimizer
+  weight_decay: 0 # the weight decay
+
+# scheduler settings
+noise_scheduler: "flow"
+scheduler:
+  num_train_timesteps: 1000
+  
+  flow_shift: 5.0
+  flow_reverse: True
+  flow_solver: euler
+
+  weighting_scheme: "logit_normal"
+  logit_mean: 0.0
+  logit_std: 1.0
+  mode_scale: 1.29
+
+logger:
+  neptune_project: real-time-video-gen/vqae # null is None, TODO, need to change accordingly
+  neptune_api_token: eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIwN2ZhODIzOC02ZmYwLTQ3ZmYtODQ0OC01ODE1ZjQxNDI0YTQifQ==
+  # wandb configuration
+  wandb:
+    enabled: true
+    entity: null
+    project: "real-time"
+
+# callbacks settings
+callbacks:
+  - module_name: model.lightning.callback
+    class_name: Visualization_HeadAnimator_Callback
+    save_freq: 500
+    output_dir: ${exp_name}/visualization
+
+  - module_name: lightning.pytorch.callbacks
+    class_name: ModelCheckpoint
+    dirpath: ${ckpt_dir} # where to save the checkpoints
+    every_n_train_steps: 2500 # how often to save checkpoints
+    # filename: run_name + '{epoch}-{step}' # the filename for the checkpoints
+    save_top_k: -1 # -1, save all checkpoints
+
+  - module_name: lightning.pytorch.callbacks
+    class_name: LearningRateMonitor
+    logging_interval: step  # Options: 'epoch' or 'step'
+
+trainer:
+  accelerator: gpu
+  # strategy: fsdp
+  # sharding_strategy: HYBRID_SHARD
+  # precision: bf16-true # bf16-mixed
+  # enable_checkpointing: true
+  # accumulate_grad_batches: 2
+  # gradient_clip_val: 1.0
+  # gradient_clip_algorithm: value
+  log_every_n_steps: 1
+  val_check_interval: 250 # evaluate the model every eval_every steps
+
+data:
+  train_bs: 4
+  train_width: 512 
+  train_height: 512 
+  hybrid_face_mask: True
+  mouth_bbox_scale: 1.4 # mouth bounding box scale for mediapipe's detection
+  eye_bbox_scale: 1.6 # eye bounding box scale for mediapipe's detection
+  dataset_file_path: '/mnt/weka/training_data_1/datasets/scraped_june_and_vfhq.npz'
+
+  # root_video_paths:
+  #   - '/mnt/weka/training_data_1/hdtf_full/videos_resampled'
+  # meta_paths:
+  #   - '/mnt/weka/training_data_1/hdtf_full/metadata'
+  
+  target_dataset_sample_rate:
+    - 1
+    - 1
+  mediapipe_mask:
+    - False
+    - True
+  convert_mediapipe_to_s3fd: True
+  
+  n_sample_frames: 15
+  past_n: 2
+  train_fps: 15
+  dataloader: EmoVideoDatasetAlex
+  train_mask_scale: 1.0
+  audio_fea_type: 'wav2vec2_type2'
+
+  # Alex dataset args
+  audio_offset_thresh: 2    # bigger to see more 
+  audio_conf_thresh: 6      # lower for lower confidence necessary
+  union_bbox_scale: 1.5
+  # union_bbox_scale: [1.7, 4.0]      # For Alex dataset when the videos are not cropped in processing
+  start_margin: 5     # how late to start
+  filter_hand_videos: True
+  zoom_out: True
+  zoom_out_ratio: [0.65, 1.0]
+  clip_after_augmentation: True
+
+  num_workers: 16
+
+
+test_data:
+  height: 384
+  width: 672
+  image_paths_and_scales:
+    - [/mnt/weka/test_data/general/001_768x768.jpg, 33]
+    - [/mnt/weka/test_data/general/002_768x768.jpg, 33]
+    - [/mnt/weka/test_data/general/003_768x768.jpg, 33]
+    - [/mnt/weka/test_data/general/004_768x768.jpg, 33]
+    - [/mnt/weka/test_data/general/005_768x768.jpg, 33]
+    # - [/mnt/weka/hw_workspace/sr_workspace/emo-dit-YXC/test_img/EeZp9T0XKUo.jpg, 1.2]
+
+inference:
+  output_dir: outputs/inference
+  num_inference_steps: 1
+  

@@ -31,7 +31,7 @@ class BEAT2Dataset(data.Dataset):
     
     @staticmethod
     def inverse_normalize(motion, mean, std):
-        return motion * std + mean
+        return motion * torch.from_numpy(std).to(motion.device) + torch.from_numpy(mean).to(motion.device)
 
     def __getitem__(self, item):
         data_item = self.data_list[item]
@@ -92,6 +92,9 @@ class BEAT2DatasetEamge(BEAT2Dataset):
 class BEAT2DatasetEamgeFootContact(BEAT2Dataset):
     def __init__(self, cfg, split):
         super().__init__(cfg, split)
+        self.stat = np.load("/home/weili/haiyang/PantoMatrix/HDTF/global_stats.npz", allow_pickle=True)
+        self.mean = self.stat["mean"]
+        self.std = self.stat["variance"]
 
     def __getitem__(self, item):
         data_item = self.data_list[item]
@@ -99,7 +102,7 @@ class BEAT2DatasetEamgeFootContact(BEAT2Dataset):
         sdx, edx = data_item["start_idx"], data_item["end_idx"]
         # print(motion_dict["random_data"].shape, sdx, edx)
         motion = motion_dict["random_data"][sdx:edx]
-        motion = self.normalize(motion, self.mean, self.std)
+        # motion = self.normalize(motion, self.mean, self.std)
         SMPLX_FPS = 30
         audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
         sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)

@@ -7,16 +7,16 @@ from utils import instantiate
 class AudioHeadAnimatorModule(HeadAnimatorModule):
     def __init__(self, config):
         super().__init__(config)
-        self._get_scheduler()
+        # self._get_scheduler()
     
     def configure_model(self):
         super().configure_model()
-        self.motion_generator = instantiate(self.config.model.motion_generator)
-        if self.config.model.motion_gen_ckpt is not None:
-            checkpoint = torch.load(self.config.model.motion_gen_ckpt)["state_dict"]
-            ckpt = {key.replace("model.", ""): value for key, value in checkpoint.items() if key.startswith("model.")}
-            self.motion_generator.load_state_dict(ckpt, strict=False)
-        self.motion_generator.to(dtype=eval(self.config.model.dtype))
+        self.motion_generator = None #instantiate(self.config.model.motion_generator)
+        # if self.config.model.motion_gen_ckpt is not None:
+        #     checkpoint = torch.load(self.config.model.motion_gen_ckpt)["state_dict"]
+        #     ckpt = {key.replace("model.", ""): value for key, value in checkpoint.items() if key.startswith("model.")}
+        #     self.motion_generator.load_state_dict(ckpt, strict=False)
+        # self.motion_generator.to(dtype=eval(self.config.model.dtype))
     
     def _get_scheduler(self):
         if self.config.get("noise_scheduler", "flow") == "flow":

@@ -549,7 +549,7 @@ class EmageAudioModel(PreTrainedModel):
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
         # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
-        self.input_up = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
+        self.input_up = nn.Linear(self.cfg.vae_codebook_size*2, self.cfg.hidden_size)
         self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size)
         # self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
         self.face_motion_cross_audio = nn.ModuleList(
@@ -584,7 +584,7 @@ class EmageAudioModel(PreTrainedModel):
         emb = self.time_embed(t).unsqueeze(1).repeat(1,n,1)
         # print(emb.shape, audio2face_fea.shape)
         # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
-        # x = torch.cat([x, masked_motion], dim=2)
+        x = torch.cat([x, masked_motion], dim=2)
         x = self.input_up(x)
         x = self.position_embeddings(x)
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
