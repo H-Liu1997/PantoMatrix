@@ -1,4 +1,4 @@
-wandb_project: 'EMAGE++'
+wandb_project: 'infp'
 exp_name: 'debug'
 debug: False
 wandb_entity: 'liu1997'
@@ -20,7 +20,6 @@ data:
     - "./datasets/data_json/beat2_s20_l64_speaker2.json"
   pose_norm: False
   
-skewed_timesteps: False
 model:
   name_pyfile: "models.emage_audio.modeling_emage_audio"
   class_name: "EmageAudioModel"
@@ -50,13 +49,6 @@ model:
   cf: 0
   cu: 0
   ch: 0 
-  edm_schedule: False
-  ode_step_size: 1e-2
-  ode_atol: 1e-5
-  ode_rtol: 1e-5
-  ode_method: "dopri5"
-  # ode_nfe:
-  
  
 validation:
   validation_steps: 500
@@ -64,7 +56,17 @@ validation:
   visualization: False
   evaluation: False
   wandb: False
+  val_loss_steps: 1000
+  denoising_steps: 20 
 
+noise_scheduler_kwargs:
+  num_train_timesteps: 1000
+  beta_start:          0.00085
+  beta_end:            0.012
+  beta_schedule:       "linear"
+  steps_offset:        1
+  clip_sample:         false
+  prediction_type:     "sample"
 
 solver:
   gradient_accumulation_steps: 1

@@ -20,7 +20,6 @@ data:
     - "./datasets/data_json/infp_s20_l64_short15.json"
   pose_norm: False
   
-skewed_timesteps: False
 model:
   name_pyfile: "models.emage_audio.modeling_emage_audio"
   class_name: "EmageAudioModel"
@@ -50,21 +49,34 @@ model:
   cf: 0
   cu: 0
   ch: 0 
-  edm_schedule: False
-  ode_step_size: 1e-2
-  ode_atol: 1e-5
-  ode_rtol: 1e-5
-  ode_method: "dopri5"
-  # ode_nfe:
+  denoising_steps: ${validation.denoising_steps}
+  seed: ${seed}
+
   
  
 validation:
   validation_steps: 500
-  test_steps: 2000
+  test_steps: 5000
   visualization: False
   evaluation: False
   wandb: False
+  val_loss_steps: 1000
+  denoising_steps: 20
 
+# weight_dtype: 'fp32'  # [fp16, fp32]
+# uncond_ratio: 0.1
+noise_offset: 0.05
+snr_gamma: 5.0
+enable_zero_snr: False
+
+noise_scheduler_kwargs:
+  num_train_timesteps: 1000
+  beta_start:          0.00085
+  beta_end:            0.012
+  beta_schedule:       "linear"
+  steps_offset:        1
+  clip_sample:         false
+  prediction_type:     "sample"
 
 solver:
   gradient_accumulation_steps: 1

@@ -12,6 +12,9 @@ from torchdiffeq import odeint
 from typing import Callable, Optional, Sequence, Tuple, Union
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, BertTokenizer, BertModel, Wav2Vec2Model, Wav2Vec2Config
 
+import inspect
+from diffusers.utils.torch_utils import randn_tensor
+from diffusers import DiffusionPipeline
 
 class TimestepEncoding(nn.Module):
     def __init__(self, embedding_dim: int):
@@ -304,6 +307,7 @@ def audio_to_time_aligned_text_features(inputs, processor, model, tokenizer, ber
     features_per_timestep = features_per_timestep.unsqueeze(0)
     return transcription, features_per_timestep, all_token_embeddings
 
+
 class WrapedWav2Vec(nn.Module):
     def __init__(self, layers=1):
         super(WrapedWav2Vec, self).__init__()
@@ -333,6 +337,7 @@ class WrapedWav2Vec(nn.Module):
         hidden_states = encoder_outputs[0]
         return {"low_level": finetune_audio_low, "high_level": hidden_states}
 
+
 def inverse_selection_tensor(filtered_t, selection_array, n):
     selection_array = torch.from_numpy(selection_array).cuda()
     original_shape_t = torch.zeros((n, 165)).cuda()
@@ -340,6 +345,7 @@ def inverse_selection_tensor(filtered_t, selection_array, n):
     for i in range(n):
         original_shape_t[i, selected_indices] = filtered_t[i]
     return original_shape_t
+
 
 class EmageVAEConv(PreTrainedModel):
     config_class = EmageVAEConvConfig
@@ -355,6 +361,7 @@ class EmageVAEConv(PreTrainedModel):
         return {
             "rec_pose": rec_pose
             }
+
 
 class EmageVQVAEConv(PreTrainedModel):
     config_class = EmageVQVAEConvConfig
@@ -393,6 +400,7 @@ class EmageVQVAEConv(PreTrainedModel):
         z_q = self.quantizer.get_codebook_entry(indices)
         rec_pose = self.decoder(z_q)
         return rec_pose
+
 
 class EmageVQModel(nn.Module):
     def __init__(self, face_model, upper_model, hands_model, lower_model, global_model):
@@ -530,6 +538,87 @@ class EmageVQModel(nn.Module):
         return global_motion
     
 
+class Pose2PosePipeline(DiffusionPipeline):
+    _optional_components = []
+    def __init__(
+        self,
+        model,
+        scheduler=None,
+    ):
+        super().__init__()
+        self.register_modules(
+            model=model,
+        )
+        if scheduler is not None:
+            self.setup_scheduler(scheduler)
+    
+    def setup_scheduler(self, scheduler):
+        self.register_modules(scheduler=scheduler)
+        
+    def prepare_extra_step_kwargs(self, generator, eta):
+        accepts_eta = "eta" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
+        extra_step_kwargs = {}
+        if accepts_eta:
+            extra_step_kwargs["eta"] = eta
+
+        accepts_generator = "generator" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
+        if accepts_generator:
+            extra_step_kwargs["generator"] = generator
+        return extra_step_kwargs
+    
+    @torch.no_grad()
+    def __call__(
+        self,
+        num_inference_steps,
+        device,
+        generator,
+        eta=0.0,
+        callback=None,
+        callback_steps=1,
+        **model_extras):
+        dtype = model_extras["masked_motion"].dtype
+        bs, n, _ = model_extras["masked_motion"].shape
+        
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+        latents = randn_tensor(
+            model_extras["masked_motion"].shape, generator=generator, device=device, dtype=dtype
+        )
+        latents = latents * self.scheduler.init_noise_sigma
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+        
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # Create a batch of timesteps
+                t_batch = torch.full((bs,), t, device=device, dtype=torch.long)
+                latent_model_input = self.scheduler.scale_model_input(
+                    latents, t
+                )
+                noise_pred = self.model(
+                    x=latent_model_input, t=t_batch, audio=model_extras["audio"], 
+                    speaker_id=model_extras["speaker_id"], masked_motion=model_extras["masked_motion"], mask=model_extras["mask"],
+                    use_audio=True)
+                # Compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
+                # Call the callback, if provided
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+        face_latent = latents
+        return face_latent
+    
+    
 class EmageAudioModel(PreTrainedModel):
     config_class = EmageAudioConfig
     base_model_prefix = "emage_audio"
@@ -563,6 +652,8 @@ class EmageAudioModel(PreTrainedModel):
         self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.time_embed = TimestepEncoding(self.cfg.hidden_size)
+        
+        self.inference_pipeline = Pose2PosePipeline(model=self)
         
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
         # mask motion
@@ -600,63 +691,8 @@ class EmageAudioModel(PreTrainedModel):
         face_latent = self.face_out_proj(decode_face)
         return face_latent
 
-    def sample(
-        self,
-        x_init: Tensor,
-        step_size: Optional[float],
-        atol: float = 1e-5,
-        rtol: float = 1e-5,
-        time_grid: Tensor = torch.tensor([0.0, 1.0]),
-        return_intermediates: bool = False,
-        enable_grad: bool = False,
-        **model_extras,
-    ) -> Union[Tensor, Sequence[Tensor]]:
-    
-        time_grid = time_grid.to(x_init.device)
-        ode_opts = {"step_size": step_size} if step_size is not None else {}
-
-        def ode_func(t, x):
-            return self.forward(x=x, t=t, **model_extras)
-        # print("inside sample", time_grid)
-        with torch.set_grad_enabled(enable_grad):
-            # Approximate ODE solution with numerical ODE solver
-            sol = odeint(
-                ode_func,
-                x_init,
-                time_grid,
-                method=self.cfg.ode_method,
-                options=ode_opts,
-                atol=atol,
-                rtol=rtol,
-            )
-        # if return_intermediates:
-        #     return sol
-        # else:
-        #     return sol[-1]
-        face_latent = sol[-1]
-        return face_latent
-        # upper_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        # hands_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        # lower_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_upper = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_hands = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_lower = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_face = torch.zeros_like(face_latent).to(face_latent.device)
-        # return  {
-        #     "rec_face": face_latent,
-        #     "rec_upper": upper_latent,
-        #     "rec_hands": hands_latent,
-        #     "rec_lower": lower_latent,
-        #     "cls_face": classify_face,
-        #     "cls_upper": classify_upper,
-        #     "cls_hands": classify_hands,
-        #     "cls_lower": classify_lower,
-        # }
-    
-        
-    def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None):
-        time_grid = torch.tensor([0.0, 1.0], device=audio.device)
-    
+    def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None, noise_scheduler=None):
+        self.inference_pipeline.setup_scheduler(noise_scheduler)
         # generate default mask and masked motion if not provided
         # length = audio.shape[1] * 30 // 16000
         length = masked_motion.shape[1]
@@ -666,6 +702,9 @@ class EmageAudioModel(PreTrainedModel):
         if masked_motion is not None:
             fake_motion[:, :masked_motion.shape[1]] = masked_motion 
         masked_motion = fake_motion
+        
+        generator = torch.Generator(device=audio.device)
+        generator.manual_seed(self.cfg.seed)
 
         fake_mask = torch.ones_like(masked_motion)
         if mask is not None:
@@ -679,7 +718,6 @@ class EmageAudioModel(PreTrainedModel):
         remain = (total_len - pre_frames) % (window - pre_frames)
         
         rec_all_face = []
-        
         last_motion = masked_motion[:, :pre_frames, :]
         for i in range(rounds):
             start_idx = i*(window - pre_frames)
@@ -701,11 +739,11 @@ class EmageAudioModel(PreTrainedModel):
             bs, t, _ = window_mask.shape
             x_init = torch.randn((bs, t, self.cfg.vae_codebook_size), dtype=torch.float32, device=window_mask.device)
             # print(self.cfg.ode_step_size)
-            face_latent = self.sample(
-                x_init, step_size=self.cfg.ode_step_size,
-                atol=self.cfg.ode_atol,
-                rtol=self.cfg.ode_rtol,
-                time_grid=time_grid,
+            face_latent = self.inference_pipeline(
+                num_inference_steps=self.cfg.denoising_steps,
+                scheduler=noise_scheduler,
+                device=audio.device,
+                generator=generator,
                 audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
             
             last_motion = face_latent[:, -pre_frames:, :]
@@ -730,12 +768,12 @@ class EmageAudioModel(PreTrainedModel):
             bs, t, _ = final_mask.shape
             x_init = torch.randn((bs, t, self.cfg.vae_codebook_size), dtype=torch.float32, device=window_mask.device)
             
-            face_latent = self.sample(
-                x_init, step_size=self.cfg.ode_step_size,
-                atol=self.cfg.ode_atol,
-                rtol=self.cfg.ode_rtol,
-                time_grid=time_grid,
-                audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
+            face_latent = self.inference_pipeline(
+                num_inference_steps=self.cfg.denoising_steps,
+                scheduler=noise_scheduler,
+                device=audio.device,
+                generator=generator,
+                audio=audio_slice, speaker_id=speaker_id, masked_motion=final_motion, mask=final_mask, use_audio=True)
             rec_all_face.append(face_latent)
             # print(face_latent.shape)
         rec_all_face = torch.cat(rec_all_face, dim=1) 

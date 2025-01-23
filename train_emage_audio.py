@@ -28,20 +28,73 @@ from emage_utils import fast_render
 from emage_utils.motion_rep_transfer import get_motion_rep_numpy
 from models.emage_audio import EmageVQVAEConv, EmageVAEConv, EmageVQModel, EmageAudioModel
 
-from flow_matching.path import CondOTProbPath
+from diffusers import DiffusionPipeline
+from diffusers.optimization import get_scheduler
+from diffusers import DDIMScheduler
+from diffusers.utils import BaseOutput
 
-def skewed_timestep_sample(num_samples: int, device: torch.device) -> torch.Tensor:
-    P_mean = -1.2
-    P_std = 1.2
-    rnd_normal = torch.randn((num_samples,), device=device)
-    sigma = (rnd_normal * P_std + P_mean).exp()
-    time = 1 / (1 + sigma)
-    time = torch.clip(time, min=0.0001, max=1.0)
-    return time
+def compute_snr(noise_scheduler, timesteps):
+    """
+    Computes SNR as per
+    https://github.com/TiankaiHang/Min-SNR-Diffusion-Training/blob/521b624bd70c67cee4bdf49225915f5945a872e3/guided_diffusion/gaussian_diffusion.py#L847-L849
+    """
+    alphas_cumprod = noise_scheduler.alphas_cumprod
+    sqrt_alphas_cumprod = alphas_cumprod**0.5
+    sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod) ** 0.5
+
+    # Expand the tensors.
+    # Adapted from https://github.com/TiankaiHang/Min-SNR-Diffusion-Training/blob/521b624bd70c67cee4bdf49225915f5945a872e3/guided_diffusion/gaussian_diffusion.py#L1026
+    sqrt_alphas_cumprod = sqrt_alphas_cumprod.to(device=timesteps.device)[
+        timesteps
+    ].float()
+    while len(sqrt_alphas_cumprod.shape) < len(timesteps.shape):
+        sqrt_alphas_cumprod = sqrt_alphas_cumprod[..., None]
+    alpha = sqrt_alphas_cumprod.expand(timesteps.shape)
+
+    sqrt_one_minus_alphas_cumprod = sqrt_one_minus_alphas_cumprod.to(
+        device=timesteps.device
+    )[timesteps].float()
+    while len(sqrt_one_minus_alphas_cumprod.shape) < len(timesteps.shape):
+        sqrt_one_minus_alphas_cumprod = sqrt_one_minus_alphas_cumprod[..., None]
+    sigma = sqrt_one_minus_alphas_cumprod.expand(timesteps.shape)
+
+    # Compute SNR.
+    snr = (alpha / sigma) ** 2
+    return snr
+
+
+def denoising_loss_fn(cfg, model_pred, target, noise_scheduler, timesteps):
+    # print(model_pred.shape, target.shape)
+    if cfg.snr_gamma == 0:
+        loss = F.mse_loss(
+            model_pred.float(), target.float(), reduction="mean"
+        )
+    else:
+        snr = compute_snr(noise_scheduler, timesteps)
+        if noise_scheduler.config.prediction_type == "v_prediction":
+            # Velocity objective requires that we add one to SNR values before we divide by them.
+            snr = snr + 1
+        mse_loss_weights = (
+            torch.stack(
+                [snr, cfg.snr_gamma * torch.ones_like(timesteps)], dim=1
+            ).min(dim=1)[0]
+            / snr
+        )
+        # print(model_pred.shape, target.shape)
+        loss = F.mse_loss(
+            model_pred.float(), target.float(), reduction="none"
+        )
+        loss = (
+            loss.mean(dim=list(range(1, len(loss.shape))))
+            * mse_loss_weights
+        )
+        loss = loss.mean()
+    return loss
 
 # ---------------------------------  train,val,test fn here --------------------------------- #
 def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     train_dataset = kwargs["train_dataset"]
+    noise_scheduler = kwargs["noise_scheduler"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     actual_model.eval()
     test_list = []
@@ -65,7 +118,8 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
         motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
         bs, t, _ = motion_latent.shape
         motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
-        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in)  
+        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
+                                                    noise_scheduler=noise_scheduler)  
         
         # motion_latent_pred = train_dataset.inverse_normalize(motion=motion_latent_pred,mean=train_dataset.mean,std=train_dataset.std)
         # motion_latent = train_dataset.inverse_normalize(motion=motion_latent,mean=train_dataset.mean,std=train_dataset.std)
@@ -82,29 +136,6 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     time_cost = time.time() - start_time
     print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
     return test_list, save_list, metrics
-
-def get_rec_loss(motion_pred, motion_gt, lu, ll, lh, lf):
-    rec_loss_upper = lu * F.mse_loss(motion_pred["rec_upper"], motion_gt["upper"])
-    rec_loss_lower = ll * F.mse_loss(motion_pred["rec_lower"], motion_gt["lower"])
-    rec_loss_hands = lh * F.mse_loss(motion_pred["rec_hands"], motion_gt["hands"])
-    rec_loss_face = lf * F.mse_loss(motion_pred["rec_face"], motion_gt["face"])
-    return rec_loss_upper+rec_loss_lower+rec_loss_hands+rec_loss_face
-
-def get_cls_loss(motion_pred, motion_gt, cu, cl, ch, cf, ClsFn):
-    ClsFn = ClsFn.to(motion_pred["cls_upper"].device)
-    pred_upper = F.log_softmax(motion_pred["cls_upper"], dim=2)
-    pred_lower = F.log_softmax(motion_pred["cls_lower"], dim=2)
-    pred_hands = F.log_softmax(motion_pred["cls_hands"], dim=2)
-    pred_face = F.log_softmax(motion_pred["cls_face"], dim=2)
-    pred_upper = pred_upper.permute(0, 2, 1)  
-    pred_lower = pred_lower.permute(0, 2, 1)
-    pred_hands = pred_hands.permute(0, 2, 1)
-    pred_face = pred_face.permute(0, 2, 1)
-    cls_loss_upper = cu * ClsFn(pred_upper, motion_gt["upper"])
-    cls_loss_lower = cl * ClsFn(pred_lower, motion_gt["lower"])
-    cls_loss_hands = ch * ClsFn(pred_hands, motion_gt["hands"])
-    cls_loss_face = cf * ClsFn(pred_face, motion_gt["face"])
-    return cls_loss_upper+cls_loss_lower+cls_loss_hands+cls_loss_face
 
 def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     if mode == "train":
@@ -129,21 +160,38 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     # else:
     #     conditioning = {"label": labels}
 
-    # Scaling to [-1, 1] from [0, 1]
-    path = CondOTProbPath()
-    samples = motion_latent # bs, n, c
-    noise = torch.randn_like(samples).to(device)
-    if cfg.skewed_timesteps:
-        t = skewed_timestep_sample(samples.shape[0], device=device)
-    else:
-        t = torch.torch.rand(samples.shape[0]).to(device)
-    path_sample = path.sample(t=t, x_0=noise, x_1=samples)
-    x_t = path_sample.x_t
-    u_t = path_sample.dx_t
+    noise_scheduler = kwargs["noise_scheduler"]
+    latents = motion_latent 
+    noise = torch.randn_like(latents).to(device)
+    if cfg.noise_offset > 0:
+        noise += cfg.noise_offset * torch.randn(
+                (latents.shape[0], latents.shape[1], 1),
+                device=latents.device,
+            )
+    timesteps = torch.randint(
+            0,
+            noise_scheduler.num_train_timesteps,
+            (bs,),
+            device=latents.device,
+        )
+    timesteps = timesteps.long()
+    noisy_latents = noise_scheduler.add_noise(
+            latents, noise, timesteps
+    )
+
+    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True)
+    if noise_scheduler.prediction_type == "epsilon":
+        target = noise
+    elif noise_scheduler.prediction_type == "v_prediction":
+        target = noise_scheduler.get_velocity(
+            latents, noise, timesteps
+        )
+    elif noise_scheduler.prediction_type == "sample":
+        target = motion_latent
     
-    motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True)
+    denoising_loss = denoising_loss_fn(cfg, motion_pred, target, noise_scheduler, timesteps)
     loss_dict = {
-        "latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
+        "denoising": denoising_loss,
     }
    
     all_loss = sum(loss_dict.values())
@@ -155,26 +203,6 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
         all_loss.backward()
         kwargs["optimizer"].step()
         kwargs["lr_scheduler"].step()
-
-    # if mode == "val":
-    #     _, cls_face =  torch.max(F.log_softmax(motion_pred["cls_face"], dim=2), dim=2)
-    #     _, cls_upper =  torch.max(F.log_softmax(motion_pred["cls_upper"], dim=2), dim=2)
-    #     _, cls_hands =  torch.max(F.log_softmax(motion_pred["cls_hands"], dim=2), dim=2)
-    #     _, cls_lower =  torch.max(F.log_softmax(motion_pred["cls_lower"], dim=2), dim=2)
-    #     face_latent = motion_pred["rec_face"] if cfg.model.lf > 0 and cfg.model.cf == 0 else None
-    #     upper_latent = motion_pred["rec_upper"] if cfg.model.lu > 0 and cfg.model.cu == 0 else None
-    #     hands_latent = motion_pred["rec_hands"] if cfg.model.lh > 0 and cfg.model.ch == 0 else None
-    #     lower_latent = motion_pred["rec_lower"] if cfg.model.ll > 0 and cfg.model.cl == 0 else None
-    #     face_index = cls_face if cfg.model.cf > 0 else None
-    #     upper_index = cls_upper if cfg.model.cu > 0 else None
-    #     hands_index = cls_hands if cfg.model.ch > 0 else None
-    #     lower_index = cls_lower if cfg.model.cl > 0 else None
-    #     decode_dict = motion_vq.decode(
-    #         face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-    #         face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,)
-    #     motion_pred_rot6d = decode_dict["all_motion4inference"][:, :, :-7]
-    #     # cache feature for evaluation
-    #     kwargs["fgd_evaluator"].update(motion_pred_rot6d, motion_gt)
     return loss_dict
 
 
@@ -239,7 +267,19 @@ def main(cfg):
         num_warmup_steps=cfg.solver.lr_warmup_steps * cfg.solver.gradient_accumulation_steps,
         num_training_steps=cfg.solver.max_train_steps * cfg.solver.gradient_accumulation_steps
     )
-
+    
+    # scheduler
+    sched_kwargs = OmegaConf.to_container(cfg.noise_scheduler_kwargs)
+    if cfg.enable_zero_snr:
+        sched_kwargs.update(
+            rescale_betas_zero_snr=True,
+            timestep_spacing="trailing",
+            # prediction_type="v_prediction",
+        )
+    val_noise_scheduler = DDIMScheduler(**sched_kwargs)
+    sched_kwargs.update({"beta_schedule": "scaled_linear"})
+    train_noise_scheduler = DDIMScheduler(**sched_kwargs)
+    
     # loss
     ClsFn = nn.NLLLoss()
 
@@ -291,14 +331,14 @@ def main(cfg):
               continue
            
             # test
-            if iteration % cfg.validation.test_steps == 0 and local_rank == 0:
-                test_save_path = os.path.join(log_dir, f"test_{iteration}")
-                os.makedirs(test_save_path, exist_ok=True)
-                with torch.no_grad():
-                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, train_dataset=train_dataset)
-                if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
-                if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
-                if cfg.test: return 0
+            # if iteration % cfg.validation.test_steps == 0 and local_rank == 0:
+            #     test_save_path = os.path.join(log_dir, f"test_{iteration}")
+            #     os.makedirs(test_save_path, exist_ok=True)
+            #     with torch.no_grad():
+            #         test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset)
+            #     if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
+            #     if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
+            #     if cfg.test: return 0
 
             # validation
             # if iteration % cfg.validation.validation_steps == 0:
@@ -324,7 +364,8 @@ def main(cfg):
 
             # train
             data_time = time.time() - data_start
-            loss_dict = train_val_fn(cfg, batch, model, device, mode="train", motion_vq=motion_vq, optimizer=optimizer, lr_scheduler=lr_scheduler, ClsFn=ClsFn, iteration=iteration)
+            loss_dict = train_val_fn(cfg, batch, model, device, mode="train", motion_vq=motion_vq, optimizer=optimizer, lr_scheduler=lr_scheduler, ClsFn=ClsFn, iteration=iteration, 
+                                     noise_scheduler=train_noise_scheduler)
             net_time = time.time() - data_start - data_time
             log_train_val(cfg, loss_dict, local_rank, loss_meters, pbar, epoch, max_epochs, iteration, net_time, data_time, optimizer, "Train")
             data_start = time.time()

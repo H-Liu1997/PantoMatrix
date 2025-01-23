@@ -5,549 +5,479 @@ import random
 import numpy as np
 from datetime import datetime
 from tqdm import tqdm
+import inspect
 import importlib
 import copy
-import librosa
-from pathlib import Path
-import json
-import time
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
-
 from diffusers.optimization import get_scheduler
+from diffusers import DDIMScheduler
+from diffusers.utils.torch_utils import randn_tensor
+from diffusers import DiffusionPipeline
+from diffusers.schedulers import (
+    PNDMScheduler,
+    LMSDiscreteScheduler,
+    EulerDiscreteScheduler,
+    EulerAncestralDiscreteScheduler,
+    DPMSolverMultistepScheduler,
+)
+from diffusers.utils import BaseOutput
+
 from omegaconf import OmegaConf
+from utils.tools import compute_snr
+from utils.draw_pose import draw_single_video, merge_single_videos_in_one_row, merge_single_videos_in_one_column, draw_overlay
 
-from emage_evaltools.mertic import FGD, BC, L1div, LVDFace, MSEFace
-from emage_utils.motion_io import beat_format_load, beat_format_save, MASK_DICT, recover_from_mask
-import emage_utils.rotation_conversions as rc
-from emage_utils import fast_render
-from emage_utils.motion_rep_transfer import get_motion_rep_numpy
-from models.emage_audio import EmageVQVAEConv, EmageVAEConv, EmageVQModel, EmageAudioModel
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Union
 
-from flow_matching.path import CondOTProbPath
-
-def skewed_timestep_sample(num_samples: int, device: torch.device) -> torch.Tensor:
-    P_mean = -1.2
-    P_std = 1.2
-    rnd_normal = torch.randn((num_samples,), device=device)
-    sigma = (rnd_normal * P_std + P_mean).exp()
-    time = 1 / (1 + sigma)
-    time = torch.clip(time, min=0.0001, max=1.0)
-    return time
-
-# ---------------------------------  train,val,test fn here --------------------------------- #
-def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
-    motion_vq = kwargs["motion_vq"]
-    actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-    actual_model.eval()
-    test_list = []
-    for data_meta_path in test_path:
-        test_list.extend(json.load(open(data_meta_path, "r")))
-    test_list = [item for item in test_list if item.get("mode") == "test"]
-    seen_ids = set()
-    test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
-
-    save_list = []
-    start_time = time.time()
-    total_length = 0
-    for test_file in tqdm(test_list, desc="Testing"):
-        audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
-        audio = torch.from_numpy(audio).to(device).unsqueeze(0)
-        speaker_id = torch.zeros(1,1).to(device).long()
-
-        # motion seed
-        motion_data = np.load(test_file["motion_path"], allow_pickle=True)
-        poses = torch.from_numpy(motion_data["poses"]).unsqueeze(0).to(device).float()
-        foot_contact = torch.from_numpy(np.load(test_file["motion_path"].replace("smplxflame_30", "footcontact").replace(".npz", ".npy"))).unsqueeze(0).to(device).float()
-        trans = torch.from_numpy(motion_data["trans"]).unsqueeze(0).to(device).float()
-        expression = torch.from_numpy(motion_data["expressions"]).unsqueeze(0).to(device).float()
-        bs, t, _ = poses.shape
-        poses_6d = rc.axis_angle_to_rotation_6d(poses.reshape(bs, t, -1, 3)).reshape(bs, t, -1)
-        masked_motion = torch.cat([poses_6d, trans, foot_contact], dim=-1) # bs t 337
-
-        latent_dict = actual_model.inference(audio, speaker_id, motion_vq, masked_motion=masked_motion)
-        face_latent = latent_dict["rec_face"] if cfg.lf > 0 and cfg.cf == 0 else None
-        upper_latent = latent_dict["rec_upper"] if cfg.lu > 0 and cfg.cu == 0 else None
-        hands_latent = latent_dict["rec_hands"] if cfg.lh > 0 and cfg.ch == 0 else None
-        lower_latent = latent_dict["rec_lower"] if cfg.ll > 0 and cfg.cl == 0 else None
-        # print(latent_dict["rec_face"].shape,latent_dict["cls_upper"].shape)
-        face_index = torch.max(F.log_softmax(latent_dict["cls_face"], dim=2), dim=2)[1] if cfg.cf > 0 else None
-        upper_index = torch.max(F.log_softmax(latent_dict["cls_upper"], dim=2), dim=2)[1] if cfg.cu > 0 else None
-        hands_index = torch.max(F.log_softmax(latent_dict["cls_hands"], dim=2), dim=2)[1] if cfg.ch > 0 else None
-        lower_index = torch.max(F.log_softmax(latent_dict["cls_lower"], dim=2), dim=2)[1] if cfg.cl > 0 else None
-
-        motion_all = motion_vq.decode(
-            face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-            face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,
-            get_global_motion=True, ref_trans=trans[:,0])
-       
-        motion_pred = motion_all["motion_axis_angle"]
-        t = motion_pred.shape[1]
-        motion_pred = motion_pred.cpu().numpy().reshape(t, -1)
-        expression_pred = motion_all["expression"].cpu().numpy().reshape(t, -1)
-        trans_pred = motion_all["trans"].cpu().numpy().reshape(t, -1)
-        # print(motion_pred.shape, expression_pred.shape, trans_pred.shape)
-        beat_format_save(os.path.join(save_path, f"{test_file['video_id']}_output.npz"), motion_pred, upsample=30//cfg.pose_fps, expressions=expression_pred, trans=trans_pred)
-        save_list.append(
-            {
-                "audio_path": test_file["audio_path"],
-                "motion_path": os.path.join(save_path, f"{test_file['video_id']}_output.npz"),
-                "video_id": test_file["video_id"],
-            }
-        )
-        total_length+=t
-    time_cost = time.time() - start_time
-    print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
-    return test_list, save_list
-
-def get_rec_loss(motion_pred, motion_gt, lu, ll, lh, lf):
-    rec_loss_upper = lu * F.mse_loss(motion_pred["rec_upper"], motion_gt["upper"])
-    rec_loss_lower = ll * F.mse_loss(motion_pred["rec_lower"], motion_gt["lower"])
-    rec_loss_hands = lh * F.mse_loss(motion_pred["rec_hands"], motion_gt["hands"])
-    rec_loss_face = lf * F.mse_loss(motion_pred["rec_face"], motion_gt["face"])
-    return rec_loss_upper+rec_loss_lower+rec_loss_hands+rec_loss_face
-
-def get_cls_loss(motion_pred, motion_gt, cu, cl, ch, cf, ClsFn):
-    ClsFn = ClsFn.to(motion_pred["cls_upper"].device)
-    pred_upper = F.log_softmax(motion_pred["cls_upper"], dim=2)
-    pred_lower = F.log_softmax(motion_pred["cls_lower"], dim=2)
-    pred_hands = F.log_softmax(motion_pred["cls_hands"], dim=2)
-    pred_face = F.log_softmax(motion_pred["cls_face"], dim=2)
-    pred_upper = pred_upper.permute(0, 2, 1)  
-    pred_lower = pred_lower.permute(0, 2, 1)
-    pred_hands = pred_hands.permute(0, 2, 1)
-    pred_face = pred_face.permute(0, 2, 1)
-    cls_loss_upper = cu * ClsFn(pred_upper, motion_gt["upper"])
-    cls_loss_lower = cl * ClsFn(pred_lower, motion_gt["lower"])
-    cls_loss_hands = ch * ClsFn(pred_hands, motion_gt["hands"])
-    cls_loss_face = cf * ClsFn(pred_face, motion_gt["face"])
-    return cls_loss_upper+cls_loss_lower+cls_loss_hands+cls_loss_face
-
-def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
+def train_val_fn(cfg, batch, model, device, noise_scheduler, mode="train", optimizer=None, lr_scheduler=None, max_grad_norm=1.0, **kwargs):
     if mode == "train":
         model.train()
-        kwargs["optimizer"].zero_grad()
+        torch.set_grad_enabled(True)
+        optimizer.zero_grad()
     else:
         model.eval()
+        torch.set_grad_enabled(False)
 
-    motion_vq = kwargs["motion_vq"]
-    motion_gt = batch["motion"].to(device)
-    audio = batch["audio"].to(device)
-    expressions_gt = batch["expressions"].to(device)
-    trans = batch["trans"].to(device)
-    foot_contact = batch["foot_contact"].to(device)
+    motion = batch["motion"].to(device)
+    cond_motion = batch["cond_motion"].to(device)
+    vaild_mask = batch["vaild_mask"].to(device)
+    vaild_mask = vaild_mask.reshape(vaild_mask.shape[0],vaild_mask.shape[1],-1)
+    vaild_mask[:, 122:124] = 0
 
-    bs, t, jc = motion_gt.shape
-    j = jc // 3
-    speaker_id = torch.zeros(bs,1).to(device).long()
-    motion_gt = rc.axis_angle_to_rotation_6d(motion_gt.reshape(bs,t,j,3)).reshape(bs, t, j*6)
-   
-    latent_index_dict = motion_vq.map2index(motion_gt, expressions_gt, tar_contact = foot_contact, tar_trans = trans)
-    latent_dict = motion_vq.map2latent(motion_gt, expressions_gt, tar_contact = foot_contact, tar_trans = trans)
-    masked_motion = torch.cat([motion_gt, trans, foot_contact], dim=-1)
-    mask = torch.ones_like(masked_motion).to(device)
-    mask[:, :cfg.model.seed_frames] = 0
+    latents = motion
+    noise = torch.randn_like(latents)
+    if cfg.noise_offset > 0:
+        noise += cfg.noise_offset * torch.randn(
+                (latents.shape[0], latents.shape[1], 1),
+                device=latents.device,
+            )
+    bsz = latents.shape[0]
+    timesteps = torch.randint(
+            0,
+            noise_scheduler.num_train_timesteps,
+            (bsz,),
+            device=latents.device,
+        )
+    timesteps = timesteps.long()
+    noisy_latents = noise_scheduler.add_noise(
+            latents, noise, timesteps
+    )
+    model_pred = model(x=noisy_latents, timesteps=timesteps, y={"cond_motion": cond_motion})
 
-    # if torch.rand(1) < args.class_drop_prob:
-    #     conditioning = {}
-    # else:
-    #     conditioning = {"label": labels}
-
-    # Scaling to [-1, 1] from [0, 1]
-    path = CondOTProbPath()
-    samples = latent_dict["face"] # bs, n, c
-    noise = torch.randn_like(samples).to(device)
-    if cfg.skewed_timesteps:
-        t = skewed_timestep_sample(samples.shape[0], device=device)
+    if noise_scheduler.prediction_type == "epsilon":
+        target = noise
+        # print("hrere")
+    elif noise_scheduler.prediction_type == "v_prediction":
+        target = noise_scheduler.get_velocity(
+            latents, noise, timesteps
+        )
+    elif noise_scheduler.prediction_type == "sample":
+        target = motion
     else:
-        t = torch.torch.rand(samples.shape[0]).to(device)
-    path_sample = path.sample(t=t, x_0=noise, x_1=samples)
-    x_t = path_sample.x_t
-    u_t = path_sample.dx_t
-    
-    motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=masked_motion, mask=mask, use_audio=True)
-    loss_dict = {
-        "face_latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
-    }
-   
-    all_loss = sum(loss_dict.values())
-    loss_dict["all"] = all_loss
-  
-    if mode == "train":
-        if cfg.solver.max_grad_norm > 0:
-          torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.solver.max_grad_norm)
-        all_loss.backward()
-        kwargs["optimizer"].step()
-        kwargs["lr_scheduler"].step()
+        raise ValueError(
+            f"Unknown prediction type {noise_scheduler.prediction_type}"
+        )
 
-    # if mode == "val":
-    #     _, cls_face =  torch.max(F.log_softmax(motion_pred["cls_face"], dim=2), dim=2)
-    #     _, cls_upper =  torch.max(F.log_softmax(motion_pred["cls_upper"], dim=2), dim=2)
-    #     _, cls_hands =  torch.max(F.log_softmax(motion_pred["cls_hands"], dim=2), dim=2)
-    #     _, cls_lower =  torch.max(F.log_softmax(motion_pred["cls_lower"], dim=2), dim=2)
-    #     face_latent = motion_pred["rec_face"] if cfg.model.lf > 0 and cfg.model.cf == 0 else None
-    #     upper_latent = motion_pred["rec_upper"] if cfg.model.lu > 0 and cfg.model.cu == 0 else None
-    #     hands_latent = motion_pred["rec_hands"] if cfg.model.lh > 0 and cfg.model.ch == 0 else None
-    #     lower_latent = motion_pred["rec_lower"] if cfg.model.ll > 0 and cfg.model.cl == 0 else None
-    #     face_index = cls_face if cfg.model.cf > 0 else None
-    #     upper_index = cls_upper if cfg.model.cu > 0 else None
-    #     hands_index = cls_hands if cfg.model.ch > 0 else None
-    #     lower_index = cls_lower if cfg.model.cl > 0 else None
-    #     decode_dict = motion_vq.decode(
-    #         face_latent=face_latent, upper_latent=upper_latent, lower_latent=lower_latent, hands_latent=hands_latent,
-    #         face_index=face_index, upper_index=upper_index, lower_index=lower_index, hands_index=hands_index,)
-    #     motion_pred_rot6d = decode_dict["all_motion4inference"][:, :, :-7]
-    #     # cache feature for evaluation
-    #     kwargs["fgd_evaluator"].update(motion_pred_rot6d, motion_gt)
+    denoising_loss = denoising_loss_fn(cfg, model_pred*vaild_mask, target*vaild_mask, noise_scheduler, timesteps)
+
+    loss_dict = {
+        "denoising": denoising_loss,
+    }
+    loss = sum(loss_dict.values())
+    loss_dict["loss"] = loss
+
+    if mode == "train":
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        optimizer.step()
+        lr_scheduler.step()
+
     return loss_dict
 
+@dataclass
+class Pose2PosePipelineOutput(BaseOutput):
+    poses: Union[torch.Tensor, np.ndarray]
 
-# ---------------------------------  main train loop here --------------------------------- #
+class Pose2PosePipeline(DiffusionPipeline):
+    _optional_components = []
+    def __init__(
+        self,
+        model,
+        scheduler: Union[
+            DDIMScheduler,
+            PNDMScheduler,
+            LMSDiscreteScheduler,
+            EulerDiscreteScheduler,
+            EulerAncestralDiscreteScheduler,
+            DPMSolverMultistepScheduler,
+        ],
+    ):
+        super().__init__()
+        self.register_modules(
+            model=model,
+            scheduler=scheduler,
+        )
+
+    @property
+    def _execution_device(self):
+        if self.device != torch.device("meta") or not hasattr(self.model, "_hf_hook"):
+            return self.device
+        for module in self.model.modules():
+            if (
+                hasattr(module, "_hf_hook")
+                and hasattr(module._hf_hook, "execution_device")
+                and module._hf_hook.execution_device is not None
+            ):
+                return torch.device(module._hf_hook.execution_device)
+        return self.device
+
+    def prepare_extra_step_kwargs(self, generator, eta):
+        accepts_eta = "eta" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
+        extra_step_kwargs = {}
+        if accepts_eta:
+            extra_step_kwargs["eta"] = eta
+
+        accepts_generator = "generator" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
+        if accepts_generator:
+            extra_step_kwargs["generator"] = generator
+        return extra_step_kwargs
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        cond_motion,
+        num_inference_steps,
+        device,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        eta: float = 0.0,
+        output_type: Optional[str] = "tensor",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: Optional[int] = 1,
+        **kwargs,
+    ):
+        dtype = cond_motion.dtype
+        batch_size = cond_motion.shape[0]
+
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+        latents = randn_tensor(
+            cond_motion.shape, generator=generator, device=device, dtype=dtype
+        )
+        latents = latents * self.scheduler.init_noise_sigma
+
+        # Prepare extra step kwargs.
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        # Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # Create a batch of timesteps
+                t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
+
+                latent_model_input = self.scheduler.scale_model_input(
+                    latents, t
+                )
+                noise_pred = self.model(
+                    x=latent_model_input,
+                    timesteps=t_batch,
+                    y={"cond_motion": cond_motion}
+                )
+                # Compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
+
+                # Call the callback, if provided
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+        output = latents
+        return Pose2PosePipelineOutput(poses=output)
+
+
+def test_fn(cfg, model, device, test_dataset, test_loader, val_noise_scheduler, iteration, test_path, **kwargs):
+    torch.set_grad_enabled(False)
+    actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    actual_model.eval()
+    generator = torch.Generator(device=device)
+    generator.manual_seed(cfg.seed)
+    pipeline = Pose2PosePipeline(
+        model=actual_model,
+        scheduler=val_noise_scheduler,
+    )
+    pipeline = pipeline.to(device)
+    
+    all_l1_loss = []
+    for idx, batch in enumerate(test_loader):
+        if idx == 64: break
+        motion = batch["motion"].to(device)
+        cond_motion = batch["cond_motion"].to(device)
+        vaild_mask = batch["vaild_mask"].to(device)
+        invalid_mask = ~vaild_mask.squeeze(0)[:, :, :2]
+
+        pose_tensor = pipeline(
+            cond_motion,
+            cfg.validation.denoising_steps,
+            device,
+            generator=generator,
+        ).poses
+        
+        # evaluation, mse loss to gt
+        pose_np = motion.cpu().squeeze(0).numpy()[:, :120]
+        pose_np = pose_np.reshape(pose_np.shape[0], 60, 2)
+        pose_np = pose_np * test_dataset.std[:60] + test_dataset.mean[:60]
+        pose_np[:, 0:1, :] = pose_np[:, 0:1, :] + pose_np[:, 1:2, :]
+        pose_np[:, 2:, :] = pose_np[:, 2:, :] + pose_np[:, 1:2, :]
+        # print(pose_np.shape, invalid_mask.shape)
+        pose_np[invalid_mask.cpu().numpy()] = -1 
+        pose_np = np.concatenate([pose_np, np.zeros((pose_np.shape[0], 68, 2))], 1)
+        np.save(test_path+f"gt_{idx}.npy", pose_np)
+
+        linear_motion = np.linspace(pose_np[0], pose_np[-1], pose_np.shape[0])
+        np.save(test_path+f"linear_{idx}.npy", linear_motion)
+
+        pred_pose_np = pose_tensor.cpu().squeeze(0).numpy()[:, :120]
+        pred_pose_np = pred_pose_np.reshape(pred_pose_np.shape[0], 60, 2)
+        pred_pose_np = pred_pose_np * test_dataset.std[:60] + test_dataset.mean[:60]
+        pred_pose_np[:, 0:1, :] = pred_pose_np[:, 0:1, :] + pred_pose_np[:, 1:2, :]
+        pred_pose_np[:, 2:, :] = pred_pose_np[:, 2:, :] + pred_pose_np[:, 1:2, :]
+        pred_pose_np[invalid_mask.cpu().numpy()] = -1
+        pred_pose_np = np.concatenate([pred_pose_np, np.zeros((pred_pose_np.shape[0], 68, 2))], 1)
+        np.save(test_path+f"pred_{idx}.npy", pred_pose_np)
+
+        cond_pose_np = cond_motion.cpu().squeeze(0).numpy()[:, :120]
+        cond_pose_np = cond_pose_np.reshape(cond_pose_np.shape[0], 60, 2)
+        cond_pose_np = cond_pose_np * test_dataset.std[:60] + test_dataset.mean[:60]
+        cond_pose_np[:, 0:1, :] = cond_pose_np[:, 0:1, :] + cond_pose_np[:, 1:2, :]
+        cond_pose_np[:, 2:, :] = cond_pose_np[:, 2:, :] + cond_pose_np[:, 1:2, :]
+        cond_pose_np[invalid_mask.cpu().numpy()] = -1
+        cond_pose_np = np.concatenate([cond_pose_np, np.zeros((cond_pose_np.shape[0], 68, 2))], 1)
+        np.save(test_path+f"cond_{idx}.npy", cond_pose_np)
+
+        l1_loss = np.abs(pose_np - pred_pose_np).mean()
+        all_l1_loss.append(l1_loss)
+       
+        # visualization
+        draw_single_video(test_path+f"gt_{idx}.mp4", test_path+f"gt_{idx}.npy", draw_face=False)
+        draw_single_video(test_path+f"pred_{idx}.mp4", test_path+f"pred_{idx}.npy", draw_face=False)
+        draw_single_video(test_path+f"cond_{idx}.mp4", test_path+f"cond_{idx}.npy", draw_face=False)
+        draw_single_video(test_path+f"linear_{idx}.mp4", test_path+f"linear_{idx}.npy", draw_face=False)
+
+        draw_overlay(test_path+f"gt_{idx}.mp4", test_path+f"pred_{idx}.mp4", test_path+f"overlay_gt_pred_{idx}.mp4")
+        draw_overlay(test_path+f"linear_{idx}.mp4", test_path+f"pred_{idx}.mp4", test_path+f"overlay_linear_pred_{idx}.mp4")
+        # draw_overlay(test_path+f"gt_{idx}.mp4", test_path+f"cond_{idx}.mp4", test_path+f"overlay_gt_cond_{idx}.mp4")
+        # draw_overlay(test_path+f"pred_{idx}.mp4", test_path+f"cond_{idx}.mp4", test_path+f"overlay_pred_cond_{idx}.mp4")
+        merge_single_videos_in_one_row(test_path+f"merge_{idx}.mp4", [test_path+f"cond_{idx}.mp4", test_path+f"linear_{idx}.mp4", test_path+f"pred_{idx}.mp4", test_path+f"gt_{idx}.mp4", test_path+f"overlay_gt_pred_{idx}.mp4", test_path+f"overlay_linear_pred_{idx}.mp4"])
+        # merge_single_videos_in_one_row(test_path+f"overlay_merge_{idx}.mp4", [test_path+f"overlay_gt_pred_{idx}.mp4", test_path+f"overlay_gt_cond_{idx}.mp4", test_path+f"overlay_pred_cond_{idx}.mp4"])
+        # merge_single_videos_in_one_column(test_path+f"merge_all_{idx}.mp4", [test_path+f"merge_{idx}.mp4", test_path+f"overlay_merge_{idx}.mp4"])
+    
+    metrics = {"l1_loss": np.mean(all_l1_loss)}
+    print(f"Test Metrics at Iteration {iteration}:")
+    for key, value in metrics.items():
+        print(f"{key}: {value:.6f}")
+    return metrics
+
+def denoising_loss_fn(cfg, model_pred, target, noise_scheduler, timesteps):
+    # print(model_pred.shape, target.shape)
+    if cfg.snr_gamma == 0:
+        loss = F.mse_loss(
+            model_pred.float(), target.float(), reduction="mean"
+        )
+    else:
+        snr = compute_snr(noise_scheduler, timesteps)
+        if noise_scheduler.config.prediction_type == "v_prediction":
+            # Velocity objective requires that we add one to SNR values before we divide by them.
+            snr = snr + 1
+        mse_loss_weights = (
+            torch.stack(
+                [snr, cfg.snr_gamma * torch.ones_like(timesteps)], dim=1
+            ).min(dim=1)[0]
+            / snr
+        )
+        # print(model_pred.shape, target.shape)
+        loss = F.mse_loss(
+            model_pred.float(), target.float(), reduction="none"
+        )
+        loss = (
+            loss.mean(dim=list(range(1, len(loss.shape))))
+            * mse_loss_weights
+        )
+        loss = loss.mean()
+    return loss
+
 def main(cfg):
-    seed_everything(cfg.seed)
-    os.environ["WANDB_API_KEY"] = cfg.wandb_key
+    # environment init
     local_rank = int(os.environ["LOCAL_RANK"]) if "LOCAL_RANK" in os.environ else 0
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     torch.distributed.init_process_group(backend="nccl")
-    log_dir = os.path.join(cfg.output_dir, cfg.exp_name)
-    experiment_ckpt_dir = os.path.join(log_dir, "checkpoints")
-    os.makedirs(experiment_ckpt_dir, exist_ok=True)
-
-    if local_rank == 0 and cfg.validation.wandb:  
-        run_time = datetime.now().strftime("%Y%m%d-%H%M")
-        wandb.init(
-            project=cfg.wandb_project,
-            name=f"{cfg.exp_name}_{run_time}",
-            entity=cfg.wandb_entity,
-            dir=log_dir,
-            config=OmegaConf.to_container(cfg)
-        )
-
-    # init
-    face_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/face").to(device)
-    upper_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/upper").to(device)
-    lower_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/lower").to(device)
-    hands_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/hands").to(device)
-    global_motion_ae = EmageVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/global").to(device)
-    motion_vq = EmageVQModel(
-      face_model=face_motion_vq, upper_model=upper_motion_vq,
-      lower_model=lower_motion_vq, hands_model=hands_motion_vq,
-      global_model=global_motion_ae).to(device)
-    for param in motion_vq.parameters():
-        param.requires_grad = False
-    motion_vq.eval()
+    seed_everything(cfg.seed)
+    experiment_ckpt_dir = experiment_log_dir = os.path.join(cfg.output_dir, cfg.exp_name)
     
-    if cfg.test:
-        model = EmageAudioModel.from_pretrained("/content/drive/MyDrive/weights/emage3/best").to(device) 
-    else:
-        model = init_hf_class(cfg.model.name_pyfile, cfg.model.class_name, cfg.model).to(device)
-  
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    for name, param in model.named_parameters():
+    # model init
+    model = init_class(cfg.model.name_pyfile, cfg.model.class_name, cfg).to(device)
+    for param in model.parameters():
         param.requires_grad = True  
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True, broadcast_buffers=False)
+ 
+    model = DDP(
+        model,
+        device_ids=[local_rank],
+        output_device=local_rank,
+        find_unused_parameters=True,
+        # broadcast_buffers=False,
+    )
 
-    # optimizer
-    optimizer_cls = torch.optim.AdamW
-    optimizer = optimizer_cls(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.solver.learning_rate,
+    # optimizer init 
+    if cfg.solver.use_8bit_adam:
+        pass
+    else:
+        optimizer_cls = torch.optim.AdamW
+
+    optimizer = optimizer_cls(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.solver.learning_rate,
         betas=(cfg.solver.adam_beta1, cfg.solver.adam_beta2),
         weight_decay=cfg.solver.adam_weight_decay,
-        eps=cfg.solver.adam_epsilon
-    )
+        eps=cfg.solver.adam_epsilon,)
     lr_scheduler = get_scheduler(
         cfg.solver.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=cfg.solver.lr_warmup_steps * cfg.solver.gradient_accumulation_steps,
-        num_training_steps=cfg.solver.max_train_steps * cfg.solver.gradient_accumulation_steps
+        num_warmup_steps=cfg.solver.lr_warmup_steps
+        * cfg.solver.gradient_accumulation_steps,
+        num_training_steps=cfg.solver.max_train_steps
+        * cfg.solver.gradient_accumulation_steps,
     )
 
-    # loss
-    ClsFn = nn.NLLLoss()
+    sched_kwargs = OmegaConf.to_container(cfg.noise_scheduler_kwargs)
+    if cfg.enable_zero_snr:
+        sched_kwargs.update(
+            rescale_betas_zero_snr=True,
+            timestep_spacing="trailing",
+            # prediction_type="v_prediction",
+        )
+    val_noise_scheduler = DDIMScheduler(**sched_kwargs)
+    sched_kwargs.update({"beta_schedule": "scaled_linear"})
+    train_noise_scheduler = DDIMScheduler(**sched_kwargs)
 
-    # dataset
+    # dataset init
     train_dataset = init_class(cfg.data.name_pyfile, cfg.data.class_name, cfg, split='train')
     test_dataset = init_class(cfg.data.name_pyfile, cfg.data.class_name, cfg, split='test')
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    train_loader = DataLoader(train_dataset, batch_size=cfg.data.train_bs, sampler=train_sampler, drop_last=True, num_workers=4)
     test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)
-    train_loader = DataLoader(train_dataset, batch_size=cfg.data.train_bs, sampler=train_sampler, drop_last=True, num_workers=8)
-    test_loader = DataLoader(test_dataset, batch_size=cfg.data.train_bs, sampler=test_sampler, drop_last=False, num_workers=8)
+    test_loader = DataLoader(test_dataset, batch_size=1, sampler=test_sampler, drop_last=False, num_workers=4)
 
-    # resume
-    if cfg.resume_from_checkpoint:
-        checkpoint = torch.load(cfg.resume_from_checkpoint, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
-        iteration = checkpoint["iteration"]
-    else:  
-        iteration = 0
-    if cfg.test:
-        iteration = 0
-
-    max_epochs = (cfg.solver.max_train_steps // len(train_loader)) + (1 if cfg.solver.max_train_steps % len(train_loader) != 0 else 0)
-    start_epoch = iteration // len(train_loader)
-    start_step_in_epoch = iteration % len(train_loader)
-    fgd_evaluator = FGD(download_path="./emage_evaltools/")
-    bc_evaluator = BC(download_path="./emage_evaltools/", sigma=0.3, order=7)
-    l1div_evaluator= L1div()
-    lvd_evaluator = LVDFace()
-    mse_evaluator = MSEFace()
-    loss_meters = {}
-    loss_meters_val = {}
-    best_fgd_val = np.inf
-    best_fgd_iteration_val= 0
-    best_fgd_test = np.inf
-    best_fgd_iteration_test = 0
-
-    # train loop
-    epoch = start_epoch
-    while iteration < cfg.solver.max_train_steps:
+    if local_rank == 0:
+        run_time = datetime.now().strftime("%Y%m%d-%H%M")
+        wandb.init(
+            project=cfg.wandb_project,
+            name=cfg.exp_name + "_" + run_time,
+            entity=cfg.wandb_entity,
+            dir=cfg.wandb_log_dir,
+            config=OmegaConf.to_container(cfg)
+        )
+    
+    num_epochs = cfg.solver.max_train_steps // len(train_loader) + 1
+    iteration = 0
+    val_best = {}
+    test_best = {}
+    
+    for epoch in range(num_epochs):
         train_sampler.set_epoch(epoch)
-        data_start = time.time()
-        pbar = tqdm(train_loader, leave=True)
-        for i, batch in enumerate(pbar):
-            # for correct resume, if the dataset is very large. since we fixed the seed, we can skip the data
-            if i < start_step_in_epoch: 
-              iteration += 1
-              continue
-           
-            # test
-            if iteration % cfg.validation.test_steps == 0 and local_rank == 0:
-                test_save_path = os.path.join(log_dir, f"test_{iteration}")
-                os.makedirs(test_save_path, exist_ok=True)
-                with torch.no_grad():
-                    test_list, save_list = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq)
-                if cfg.validation.evaluation:
-                    metrics = evaluation_fn([True]*55, test_list, save_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device, lvd_evaluator, mse_evaluator)
-                if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
-                if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
-                if cfg.test: return 0
 
-            # validation
-            # if iteration % cfg.validation.validation_steps == 0:
-            #     loss_meters = {}
-            #     loss_meters_val = {}
-            #     fgd_evaluator.reset()
-            #     pbar_val = tqdm(test_loader, leave=True)
+        for i, batch in enumerate(train_loader):
+            loss_dict = train_val_fn(
+                cfg, batch, model, device, train_noise_scheduler, mode="train", optimizer=optimizer, lr_scheduler=lr_scheduler
+            )
+            if local_rank == 0 and iteration % cfg.log_period == 0:
+                for key, value in loss_dict.items():
+                    wandb.log({f"train/{key}": value}, step=iteration)
+                loss_message = ", ".join([f"{k}: {v:.6f}" for k, v in loss_dict.items()])
+                print(f"Epoch {epoch} [{i}/{len(train_loader)}] - {loss_message}")
 
-            #     data_start_val = time.time()  
-            #     for j, batch in enumerate(pbar_val):
-            #         data_time_val = time.time() - data_start_val
-            #         with torch.no_grad():
-            #             val_loss_dict = train_val_fn(cfg, batch, model, device, mode="val", fgd_evaluator=fgd_evaluator, motion_vq=motion_vq, ClsFn=ClsFn, iteration=iteration)
-            #         net_time_val = time.time() - data_start_val
-            #         val_loss_dict["fgd"] = fgd_evaluator.compute() if j == len(test_loader) - 1 else 0
-            #         log_train_val(cfg, val_loss_dict, local_rank, loss_meters_val, pbar_val, epoch, max_epochs, iteration, net_time_val, data_time_val, optimizer, "Val  ")
-            #         data_start_val = time.time()
-            #         if cfg.debug and j > 1: break
+            if local_rank == 0 and iteration % cfg.validation.val_loss_steps == 0:
+                val_loss_dict = {}
+                val_batches = 0
+                for batch in tqdm(test_loader):
+                    loss_dict = train_val_fn(
+                        cfg, batch, model, device, val_noise_scheduler, mode="val"
+                    )
+                    for k, v in loss_dict.items():
+                        if k not in val_loss_dict:
+                            val_loss_dict[k] = 0
+                        val_loss_dict[k] += v.item()
+                    val_batches += 1
+                    if val_batches == 10:
+                        break
+                val_loss_mean_dict = {k: v / val_batches for k, v in val_loss_dict.items()}
+                for k, v in val_loss_mean_dict.items():
+                    if k not in val_best or v < val_best[k]["value"]:
+                        val_best[k] = {"value": v, "iteration": iteration}
+                        if "denoising" in k:
+                            checkpoint_path = os.path.join(experiment_ckpt_dir, f"ckpt_{k}")
+                            os.makedirs(checkpoint_path, exist_ok=True)
+                            torch.save({
+                                'iteration': iteration,
+                                'model_state_dict': model.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+                            }, os.path.join(checkpoint_path, "ckpt.pth"))
 
-            #     if local_rank == 0:
-            #         best_fgd_val, best_fgd_iteration_val = save_last_and_best_ckpt(
-            #             model, optimizer, lr_scheduler, iteration, experiment_ckpt_dir, best_fgd_val, best_fgd_iteration_val, val_loss_dict["fgd"], lower_is_better=True, mertic_name="fgd")
+                    print(f"Val [{iteration}] - {k}: {v:.6f} (best: {val_best[k]['value']:.6f} at {val_best[k]['iteration']})")
+                    wandb.log({f"val/{k}": v}, step=iteration)
+        
+                checkpoint_path = os.path.join(experiment_ckpt_dir, f"checkpoint_{iteration}")
+                os.makedirs(checkpoint_path, exist_ok=True)
+                torch.save({
+                    'iteration': iteration,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+                }, os.path.join(checkpoint_path, "ckpt.pth"))
+                checkpoints = [d for d in os.listdir(experiment_ckpt_dir) if os.path.isdir(os.path.join(experiment_ckpt_dir, d)) and d.startswith("checkpoint_")]
+                checkpoints.sort(key=lambda x: int(x.split("_")[1]))
+                if len(checkpoints) > 3:
+                    for ckpt_to_delete in checkpoints[:-3]:
+                        shutil.rmtree(os.path.join(experiment_ckpt_dir, ckpt_to_delete))
 
-            # train
-            data_time = time.time() - data_start
-            loss_dict = train_val_fn(cfg, batch, model, device, mode="train", motion_vq=motion_vq, optimizer=optimizer, lr_scheduler=lr_scheduler, ClsFn=ClsFn, iteration=iteration)
-            net_time = time.time() - data_start - data_time
-            log_train_val(cfg, loss_dict, local_rank, loss_meters, pbar, epoch, max_epochs, iteration, net_time, data_time, optimizer, "Train")
-            data_start = time.time()
-
+            if local_rank == 0 and iteration % cfg.validation.validation_steps == 0:
+                test_path = os.path.join(experiment_ckpt_dir, f"test_{iteration}") + "/"
+                os.makedirs(test_path, exist_ok=True)
+                test_metric_dict = test_fn(cfg, model, device, test_dataset, test_loader, val_noise_scheduler, iteration, test_path)
+                for k, v in test_metric_dict.items():
+                    if k not in test_best or v < test_best[k]["value"]:
+                        test_best[k] = {"value": v, "iteration": iteration}  
+                    print(f"Test [{iteration}] - {k}: {v:.6f} (best: {test_best[k]['value']:.6f} at {test_best[k]['iteration']})")
+                    wandb.log({f"test/{k}": v}, step=iteration)
+                video_for_log = []
+                video_res_path = os.path.join(test_path)
+                for mp4_file in os.listdir(video_res_path):
+                    if mp4_file.endswith(".mp4"):
+                        file_path = os.path.join(video_res_path, mp4_file)
+                        log_video = wandb.Video(file_path, caption=f"{iteration:06d}-{mp4_file}", format="mp4")
+                        video_for_log.append(log_video)
+                wandb.log(
+                  {"test/videos": video_for_log},
+                  step=iteration
+                )
             iteration += 1
-   
-        start_step_in_epoch = 0
-        epoch += 1
 
-    if local_rank == 0 and cfg.validation.wandb:
+    if local_rank == 0:
         wandb.finish()
     torch.distributed.destroy_process_group()
-
-
-# ---------------------------------  utils fn here --------------------------------- #
-def evaluation_fn(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, device, lvd_evaluator, mse_evaluator):
-    fgd_evaluator.reset()
-    bc_evaluator.reset()
-    l1_evaluator.reset()
-    lvd_evaluator.reset()
-    mse_evaluator.reset()
-
-    for test_file in tqdm(gt_list, desc="Evaluation"):
-        # only load selective joints
-        pred_file = [item for item in pred_list if item["video_id"] == test_file["video_id"]][0]
-        if not pred_file:
-            print(f"Missing prediction for {test_file['video_id']}")
-            continue
-        # print(test_file["motion_path"], pred_file["motion_path"])
-        gt_dict = beat_format_load(test_file["motion_path"], joint_mask)
-        pred_dict = beat_format_load(pred_file["motion_path"], joint_mask)
-
-        motion_gt = gt_dict["poses"]
-        motion_pred = pred_dict["poses"]
-        expressions_gt = gt_dict["expressions"]
-        expressions_pred = pred_dict["expressions"]
-        betas = gt_dict["betas"]
-        # motion_gt = recover_from_mask(motion_gt, joint_mask) # t1*165
-        # motion_pred = recover_from_mask(motion_pred, joint_mask) # t2*165
-    
-        t = min(motion_gt.shape[0], motion_pred.shape[0])
-        motion_gt = motion_gt[:t]
-        motion_pred = motion_pred[:t]
-        expressions_gt = expressions_gt[:t]
-        expressions_pred = expressions_pred[:t]
-       
-        # bc and l1 require position representation
-        motion_position_pred = get_motion_rep_numpy(motion_pred, device=device, betas=betas)["position"] # t*55*3
-        motion_position_pred = motion_position_pred.reshape(t, -1)
-        # ignore the start and end 2s, this may for beat dataset only
-        audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=2 * 16000, t_end=int((t-60)/30*16000))
-        motion_beat = bc_evaluator.load_motion(motion_position_pred, t_start=60, t_end=t-60, pose_fps=30, without_file=True)
-        bc_evaluator.compute(audio_beat, motion_beat, length=t-120, pose_fps=30)
-        # audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=0 * 16000, t_end=int((t-0)/30*16000))
-        # motion_beat = bc_evaluator.load_motion(motion_position_pred, t_start=0, t_end=t-0, pose_fps=30, without_file=True)
-        # bc_evaluator.compute(audio_beat, motion_beat, length=t-0, pose_fps=30)
-
-        l1_evaluator.compute(motion_position_pred)
-       
-        face_position_pred = get_motion_rep_numpy(motion_pred, device=device, expressions=expressions_pred, expression_only=True, betas=betas)["vertices"] # t -1
-        face_position_gt = get_motion_rep_numpy(motion_gt, device=device, expressions=expressions_gt, expression_only=True, betas=betas)["vertices"]
-        lvd_evaluator.compute(face_position_pred, face_position_gt)
-        mse_evaluator.compute(face_position_pred, face_position_gt)
-       
-        # fgd requires rotation 6d representaiton
-        motion_gt = torch.from_numpy(motion_gt).to(device).unsqueeze(0)
-        motion_pred = torch.from_numpy(motion_pred).to(device).unsqueeze(0)
-        motion_gt = rc.axis_angle_to_rotation_6d(motion_gt.reshape(1, t, 55, 3)).reshape(1, t, 55*6)
-        motion_pred = rc.axis_angle_to_rotation_6d(motion_pred.reshape(1, t, 55, 3)).reshape(1, t, 55*6)
-        fgd_evaluator.update(motion_pred.float(), motion_gt.float())
-       
-    metrics = {}
-    metrics["fgd"] = fgd_evaluator.compute()
-    metrics["bc"] = bc_evaluator.avg()
-    metrics["l1"] = l1_evaluator.avg()
-    metrics["lvd"] = lvd_evaluator.avg()
-    metrics["mse"] = mse_evaluator.avg()
-    return metrics
-
-def visualization_fn(pred_list, save_path, gt_list=None, only_check_one=True):
-    if gt_list is None: # single visualization
-        for i in range(len(pred_list)):
-            fast_render.render_one_sequence(
-                pred_list[i]["motion_path"],
-                save_path,
-                pred_list[i]["audio_path"],
-                model_folder="./evaluation/smplx_models/",
-            )
-            if only_check_one: break
-    else: # paired visualization, pad the translation
-        for i in range(len(pred_list)):
-            npz_pred = np.load(pred_list[i]["motion_path"], allow_pickle=True)
-            gt_file = [item for item in gt_list if item["video_id"] == pred_list[i]["video_id"]][0]
-            if not gt_file:
-                print(f"Missing prediction for {pred_list[i]['video_id']}")
-                continue
-            npz_gt = np.load(gt_file["motion_path"], allow_pickle=True)
-            t  = npz_gt["poses"].shape[0]
-            np.savez(
-                os.path.join(save_path, f"{pred_list[i]['video_id']}_transpad.npz"),
-                betas=npz_pred['betas'][:t],
-                poses=npz_pred['poses'][:t],
-                expressions=npz_pred['expressions'][:t],
-                trans=npz_pred["trans"][:t],
-                model='smplx2020',
-                gender='neutral',
-                mocap_frame_rate=30,
-            )
-            fast_render.render_one_sequence(
-                os.path.join(save_path, f"{pred_list[i]['video_id']}_transpad.npz"),
-                gt_file["motion_path"],
-                save_path,
-                pred_list[i]["audio_path"],
-                model_folder="./evaluation/smplx_models/",
-            )
-            if only_check_one: break
-     
-def log_test(model, metrics, iteration, best_mertics, best_iteration, cfg, local_rank, experiment_ckpt_dir, video_save_path=None):
-    if local_rank == 0:
-        print(f"\n Test Results at iteration {iteration}:")
-        for key, value in metrics.items():
-            print(f"  {key}: {value:.10f}")
-        if cfg.validation.wandb:
-            for key, value in metrics.items():
-                wandb.log({f"test/{key}": value}, step=iteration)
-        if cfg.validation.wandb and cfg.validation.visualization:
-            videos_to_log = []
-            for filename in os.listdir(video_save_path):
-                if filename.endswith(".mp4"):
-                    videos_to_log.append(wandb.Video(os.path.join(video_save_path, filename)))
-            if videos_to_log:
-                wandb.log({"test/videos": videos_to_log}, step=iteration)
-        if metrics["fgd"] < best_mertics:
-            best_mertics = metrics["fgd"]
-            best_iteration = iteration
-            model.module.save_pretrained(os.path.join(experiment_ckpt_dir, "test_best"))
-        # print(metrics, best_mertics, best_iteration)
-        message = f"Current Test FGD: {metrics['fgd']:.4f} (Best: {best_mertics:.4f} at iteration {best_iteration})"
-        log_metric_with_box(message)
-    return best_mertics, best_iteration
-
-def log_metric_with_box(message):
-    box_width = len(message) + 2
-    border = "-" * box_width
-    print(f"\n{border}")
-    print(f"|{message}|")
-    print(f"{border}\n")
-
-def log_train_val(cfg, loss_dict, local_rank, loss_meters, pbar, epoch, max_epochs, iteration, net_time, data_time, optimizer, ptype="Train"):
-    new_loss_dict = {}
-    for k, v in loss_dict.items():
-        if "fgd" in k: continue
-        v_cpu = torch.as_tensor(v).float().cpu().item()
-        if k not in loss_meters:
-            loss_meters[k] = {"sum":0,"count":0}
-        loss_meters[k]["sum"] += v_cpu
-        loss_meters[k]["count"] += 1
-        new_loss_dict[k] = v_cpu
-    mem_used = torch.cuda.memory_reserved() / 1E9
-    lr = optimizer.param_groups[0]["lr"]
-    loss_str = " ".join([f"{k}: {new_loss_dict[k]:.4f}({loss_meters[k]['sum']/loss_meters[k]['count']:.4f})" for k in new_loss_dict])
-    desc = f"{ptype}: Epoch[{epoch}/{max_epochs}] Iter[{iteration}] {loss_str} lr: {lr:.2E} data_time: {data_time:.3f} net_time: {net_time:.3f} mem: {mem_used:.2f}GB"
-    pbar.set_description(desc)
-    pbar.bar_format = "{desc} {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-    if cfg.validation.wandb and local_rank == 0:
-        for k, v in new_loss_dict.items():
-            wandb.log({f"loss/{ptype}/{k}": v}, step=iteration)
-
-def save_last_and_best_ckpt(model, optimizer, lr_scheduler, iteration, save_dir, previous_best, best_iteration, current, lower_is_better=True, mertic_name="fgd"):
-    checkpoint = {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-            "iteration": iteration,
-        }
-    torch.save(checkpoint, os.path.join(save_dir, "last.bin"))
-    model.module.save_pretrained(os.path.join(save_dir, "last"))
-    if (lower_is_better and current < previous_best) or (not lower_is_better and current > previous_best):
-        previous_best = current
-        best_iteration = iteration
-        shutil.copy(os.path.join(save_dir, "last.bin"), os.path.join(save_dir, "best.bin"))
-        model.module.save_pretrained(os.path.join(save_dir, "best"))
-    message = f"Current interation {iteration} {mertic_name}: {current:.4f} (Best: {previous_best:.4f} at iteration {best_iteration})"
-    log_metric_with_box(message)
-    return previous_best, best_iteration
-
-def init_hf_class(module_name, class_name, config, **kwargs):
-    module = importlib.import_module(module_name)
-    model_class = getattr(module, class_name)
-    config_class = model_class.config_class
-    config = config_class(config_obj=config)
-    instance = model_class(config, **kwargs)
-    return instance
 
 def init_class(module_name, class_name, config, **kwargs):
     module = importlib.import_module(module_name)
@@ -556,58 +486,54 @@ def init_class(module_name, class_name, config, **kwargs):
     return instance
 
 def seed_everything(seed):
-    os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.enabled = True
 
-def init_env():
+def prepare_all():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/train/stage2.yaml")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--visualization", action="store_true")
-    parser.add_argument("--evaluation", action="store_true")
-    parser.add_argument("--test", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="Enable debugging mode")
     parser.add_argument('overrides', nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    config = OmegaConf.load(args.config)
-    config.exp_name = os.path.splitext(os.path.basename(args.config))[0]
 
-    if args.overrides: config = OmegaConf.merge(config, OmegaConf.from_dotlist(args.overrides))
+    if args.config.endswith(".yaml"):
+        config = OmegaConf.load(args.config)
+        config.exp_name = args.config.split("/")[-1][:-5]
+    else:
+        raise ValueError("Unsupported config file format. Only .yaml files are allowed.")
+
     if args.debug:
         config.wandb_project = "debug"
         config.exp_name = "debug"
         config.solver.max_train_steps = 4
-    else:
-        run_time = datetime.now().strftime("%Y%m%d-%H%M")
-        config.exp_name = config.exp_name + "_" + run_time
-    if args.wandb:
-        config.validation.wandb = True
-    if args.visualization:
-        config.validation.visualization = True
-    if args.evaluation:
-        config.validation.evaluation = True
-    if args.test:
-        config.test = True
+
+    if args.overrides:
+        config = OmegaConf.merge(config, OmegaConf.from_dotlist(args.overrides))
+    
+    os.environ["WANDB_API_KEY"] = config.wandb_key
+
     save_dir = os.path.join(config.output_dir, config.exp_name)
     os.makedirs(save_dir, exist_ok=True)
-    sanity_check_dir = os.path.join(save_dir, 'sanity_check')
-    os.makedirs(sanity_check_dir, exist_ok=True)
-    with open(os.path.join(sanity_check_dir, f'{config.exp_name}.yaml'), 'w') as f:
+    os.makedirs(os.path.join(save_dir, 'sanity_check'), exist_ok=True)
+
+    config_path = os.path.join(save_dir, 'sanity_check', f'{config.exp_name}.yaml')
+    with open(config_path, 'w') as f:
         OmegaConf.save(config, f)
-    current_dir = Path.cwd()
-    for py_file in current_dir.rglob('*.py'):
-        dest_path = Path(sanity_check_dir) / py_file.relative_to(current_dir)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(py_file, dest_path)
+
+    current_dir = os.getcwd()
+    sanity_check_dir = os.path.join(save_dir, 'sanity_check')
+    for root, dirs, files in os.walk(current_dir):
+        for file in files:
+            if file.endswith(".py"):
+                full_file_path = os.path.join(root, file)
+                relative_path = os.path.relpath(full_file_path, current_dir)
+                dest_path = os.path.join(sanity_check_dir, relative_path)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.copy(full_file_path, dest_path)
     return config
 
 if __name__ == "__main__":
-    config = init_env()
+    config = prepare_all()
     main(config)
