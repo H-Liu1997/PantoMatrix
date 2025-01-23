@@ -638,7 +638,7 @@ class EmageAudioModel(PreTrainedModel):
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
         # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
-        self.input_up = nn.Linear(self.cfg.vae_codebook_size*2, self.cfg.hidden_size)
+        self.input_up = nn.Linear(self.cfg.vae_codebook_size*2+1, self.cfg.hidden_size)
         self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size)
         # self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
         self.face_motion_cross_audio = nn.ModuleList(
@@ -649,9 +649,10 @@ class EmageAudioModel(PreTrainedModel):
                 for _ in range(4)
             ]
         ) 
-        self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
-        self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
+        # self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
+        # self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
         self.time_embed = TimestepEncoding(self.cfg.hidden_size)
+        self.face_decoder = nn.LSTM(self.cfg.hidden_size+self.cfg.vae_codebook_size+1, self.cfg.vae_codebook_size, num_layers=2, batch_first=True)
         
         self.inference_pipeline = Pose2PosePipeline(model=self)
         
@@ -659,6 +660,7 @@ class EmageAudioModel(PreTrainedModel):
         # mask motion
         # masked_embeddings = self.mask_embedding.expand_as(masked_motion) # bs, n, d
         masked_motion = torch.where(mask==1, 0.0, masked_motion) # frist 4 is gt
+        masked_label = torch.where(mask==1, 0.0, 1.0)[:, :, 0:1]
         
         audio_list = [i.cpu().numpy() for i in audio]
         inputs = self.audio_processor(audio_list, sampling_rate=16000, return_tensors="pt", padding=True).to(audio.device)
@@ -668,6 +670,9 @@ class EmageAudioModel(PreTrainedModel):
         if audio2face_fea.shape[1] > n:
           audio2face_fea = audio2face_fea[:, :n]
         masked_motion = masked_motion[:, :n]
+        masked_label = masked_label[:, :n]
+        masked_motion = torch.cat([masked_motion, masked_label], dim=-1)
+        
         # print(masked_motion.shape, x.shape)
         if t.dim() == 0:
             t = t.unsqueeze(0)
@@ -688,7 +693,9 @@ class EmageAudioModel(PreTrainedModel):
                 audio2face_fea_proj,
                 emb,
             )
-        face_latent = self.face_out_proj(decode_face)
+        hidden = None
+        decode_face = torch.cat([decode_face, masked_motion], dim=-1)
+        face_latent, hidden = self.face_decoder(decode_face, hidden)
         return face_latent
 
     def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None, noise_scheduler=None):
