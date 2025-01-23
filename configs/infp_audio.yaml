@@ -13,7 +13,7 @@ test: False
 data:
   name_pyfile: "datasets.beat2"
   class_name: "BEAT2DatasetEamgeFootContact"
-  train_bs: 56
+  train_bs: 32
   meta_paths:
     - "./datasets/data_json/infp_s20_l64_short15.json"
   test_meta_paths: 
@@ -43,7 +43,7 @@ model:
   joint_mask: null
   vae_codebook_size: 512
   ll: 0
-  lf: 3
+  lf: 1
   lu: 0
   lh: 0
   cl: 0
@@ -60,7 +60,7 @@ model:
  
 validation:
   validation_steps: 500
-  test_steps: 2000
+  test_steps: 5000
   visualization: False
   evaluation: False
   wandb: False
@@ -69,12 +69,12 @@ validation:
 solver:
   gradient_accumulation_steps: 1
   gradient_checkpointing: False 
-  max_train_steps: 100000
+  max_train_steps: 200000
   max_grad_norm: 0.99
   # lr
-  learning_rate: 1e-4
+  learning_rate: 2e-5
   scale_lr: False 
-  lr_warmup_steps: 0
+  lr_warmup_steps: 100
   lr_scheduler: 'constant'
   # optimizer
   use_8bit_adam: False 

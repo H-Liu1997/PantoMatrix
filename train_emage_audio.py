@@ -143,7 +143,7 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     
     motion_pred = model(x=x_t, t=t, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True)
     loss_dict = {
-        "latent_flow": torch.pow(motion_pred - u_t, 2).mean(),
+        "latent": torch.pow(motion_pred - motion_latent, 2).mean(),
     }
    
     all_loss = sum(loss_dict.values())

@@ -16,7 +16,7 @@ transform = T.Compose([
     T.Normalize([0.5], [0.5])
 ])
     
-motion_latent_dir = "/home/weili/haiyang/outputs/infp_audio_20250121-1651/test_74000"
+motion_latent_dir = "/home/weili/haiyang/outputs/infp_audio_20250122-1011/test_200000"
 gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent/"
 video_dir = "/mnt/weka/training_data_1/hdtf_full/videos_resampled/"
 save_path = "/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions/"
@@ -27,7 +27,7 @@ module = instantiate(config.model, instantiate_module=False)
 model = module(config=config)
 checkpoint = torch.load(config.resume_ckpt)
 model.load_state_dict(checkpoint["state_dict"], strict=False)
-model.eval().to("cuda:2")
+model.eval().to("cuda:5")
 print(f'Load weight from {config.resume_ckpt}')
 motion_encoder = model.motion_encoder
 flow_estimator = model.flow_estimator
@@ -39,15 +39,15 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
         continue
     file_name = latent_file[:-15]
     gt_latent = np.load(os.path.join(gt_latent_dir, file_name + ".npz"), allow_pickle=True)["random_data"]
-    gt_latent = torch.from_numpy(gt_latent).to("cuda:2")
+    gt_latent = torch.from_numpy(gt_latent).to("cuda:5")
     tgt_latent = np.load(os.path.join(motion_latent_dir, latent_file))
-    tgt_latent = torch.from_numpy(tgt_latent).to("cuda:2").squeeze(0).float()
+    tgt_latent = torch.from_numpy(tgt_latent).to("cuda:5").squeeze(0).float()
     print(tgt_latent.shape)
     
     aligned_video = os.path.join(video_dir, file_name + ".mp4")
     load_video = VideoReader(aligned_video)
     source_img = load_video[0].asnumpy()
-    source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda:2")
+    source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda:5")
     # print(source_img.shape)
     
     src_latent = gt_latent[0:1]

@@ -304,6 +304,7 @@ def audio_to_time_aligned_text_features(inputs, processor, model, tokenizer, ber
     features_per_timestep = features_per_timestep.unsqueeze(0)
     return transcription, features_per_timestep, all_token_embeddings
 
+
 class WrapedWav2Vec(nn.Module):
     def __init__(self, layers=1):
         super(WrapedWav2Vec, self).__init__()
@@ -333,6 +334,7 @@ class WrapedWav2Vec(nn.Module):
         hidden_states = encoder_outputs[0]
         return {"low_level": finetune_audio_low, "high_level": hidden_states}
 
+
 def inverse_selection_tensor(filtered_t, selection_array, n):
     selection_array = torch.from_numpy(selection_array).cuda()
     original_shape_t = torch.zeros((n, 165)).cuda()
@@ -340,6 +342,7 @@ def inverse_selection_tensor(filtered_t, selection_array, n):
     for i in range(n):
         original_shape_t[i, selected_indices] = filtered_t[i]
     return original_shape_t
+
 
 class EmageVAEConv(PreTrainedModel):
     config_class = EmageVAEConvConfig
@@ -355,6 +358,7 @@ class EmageVAEConv(PreTrainedModel):
         return {
             "rec_pose": rec_pose
             }
+
 
 class EmageVQVAEConv(PreTrainedModel):
     config_class = EmageVQVAEConvConfig
@@ -393,6 +397,7 @@ class EmageVQVAEConv(PreTrainedModel):
         z_q = self.quantizer.get_codebook_entry(indices)
         rec_pose = self.decoder(z_q)
         return rec_pose
+
 
 class EmageVQModel(nn.Module):
     def __init__(self, face_model, upper_model, hands_model, lower_model, global_model):
@@ -537,37 +542,33 @@ class EmageAudioModel(PreTrainedModel):
         super().__init__(config)
         self.cfg = config
         # audio encoder
-        # self.audio_encoder_face = WavEncoder(self.cfg.audio_f)
         self.audio_encoder_face = WrapedWav2Vec(layers=4)        
         self.audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
         # speaker id
-        self.speaker_embedding_face = nn.Embedding(self.cfg.speaker_dims, self.cfg.hidden_size)
+        self.motion_bank = nn.Parameter(torch.zeros(1,1,self.cfg.hidden_size))
+        nn.init.normal_(self.motion_bank, 0, self.cfg.vae_codebook_size**-0.5)
         # mask embedding
         self.mask_embedding = nn.Parameter(torch.zeros(1,1,self.cfg.vae_codebook_size))
         nn.init.normal_(self.mask_embedding, 0, self.cfg.hidden_size**-0.5)
         
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
-        # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
+        self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
+        
         # face decoder
         self.input_up = nn.Linear(self.cfg.vae_codebook_size*2, self.cfg.hidden_size)
         self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size)
-        # self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
-        self.face_motion_cross_audio = nn.ModuleList(
-            [
-                FilmTransformerDecoderLayer(
-                    self.cfg.hidden_size, self.cfg.hidden_size, 4, self.cfg.hidden_size*2, 0.1
-                )
-                for _ in range(4)
-            ]
-        ) 
-        self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
-        self.face_cls = MLP(self.cfg.vae_codebook_size, self.cfg.hidden_size, self.cfg.vae_codebook_size)
-        self.time_embed = TimestepEncoding(self.cfg.hidden_size)
+        self.face_motion_self = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
+        self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
+
+        # self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)
+        self.face_decoder = nn.LSTM(self.cfg.hidden_size+self.cfg.vae_codebook_size+1, self.cfg.vae_codebook_size, num_layers=2, batch_first=True)
+        # self.time_embed = TimestepEncoding(self.cfg.hidden_size)
         
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
         # mask motion
         # masked_embeddings = self.mask_embedding.expand_as(masked_motion) # bs, n, d
         masked_motion = torch.where(mask==1, 0.0, masked_motion) # frist 4 is gt
+        masked_label = torch.where(mask==1, 0.0, 1.0)[:, :, 0:1] # bs, n, 1
         
         audio_list = [i.cpu().numpy() for i in audio]
         inputs = self.audio_processor(audio_list, sampling_rate=16000, return_tensors="pt", padding=True).to(audio.device)
@@ -577,86 +578,22 @@ class EmageAudioModel(PreTrainedModel):
         if audio2face_fea.shape[1] > n:
           audio2face_fea = audio2face_fea[:, :n]
         masked_motion = masked_motion[:, :n]
-        # print(masked_motion.shape, x.shape)
-        if t.dim() == 0:
-            t = t.unsqueeze(0)
-        # print(t)      
-        emb = self.time_embed(t).unsqueeze(1).repeat(1,n,1)
-        # print(emb.shape, audio2face_fea.shape)
-        # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
-        x = torch.cat([x, masked_motion], dim=2)
-        x = self.input_up(x)
-        x = self.position_embeddings(x)
+        masked_label = masked_label[:, :n]
+        masked_motion = torch.cat([masked_motion, masked_label], dim=-1)
+        
+        motion_bank = self.motion_bank.repeat(bs, 1, 1)
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
-        decode_face = x
-        # decode_face = self.face_motion_cross_audio(x, audio2face_fea_proj, emb)
-        for decoder_layer in self.face_motion_cross_audio:
-            decode_face = decoder_layer(
-                decode_face,
-                audio2face_fea_proj,
-                emb,
-            )
-        face_latent = self.face_out_proj(decode_face)
+        audio_fea_self = self.face_motion_self(audio2face_fea_proj.transpose(0, 1), audio2face_fea_proj.transpose(0, 1)).transpose(0, 1)
+        audio_fea_self = self.position_embeddings(audio_fea_self)
+        audio_fea_cross = self.face_motion_cross_audio(audio_fea_self.transpose(0, 1), motion_bank.transpose(0, 1)).transpose(0, 1)
+        hidden = None
+        audio_fea_cross = torch.cat([audio_fea_cross, masked_motion], dim=-1)
+        face_latent, hidden = self.face_decoder(audio_fea_cross, hidden)
         return face_latent
-
-    def sample(
-        self,
-        x_init: Tensor,
-        step_size: Optional[float],
-        atol: float = 1e-5,
-        rtol: float = 1e-5,
-        time_grid: Tensor = torch.tensor([0.0, 1.0]),
-        return_intermediates: bool = False,
-        enable_grad: bool = False,
-        **model_extras,
-    ) -> Union[Tensor, Sequence[Tensor]]:
-    
-        time_grid = time_grid.to(x_init.device)
-        ode_opts = {"step_size": step_size} if step_size is not None else {}
-
-        def ode_func(t, x):
-            return self.forward(x=x, t=t, **model_extras)
-        # print("inside sample", time_grid)
-        with torch.set_grad_enabled(enable_grad):
-            # Approximate ODE solution with numerical ODE solver
-            sol = odeint(
-                ode_func,
-                x_init,
-                time_grid,
-                method=self.cfg.ode_method,
-                options=ode_opts,
-                atol=atol,
-                rtol=rtol,
-            )
-        # if return_intermediates:
-        #     return sol
-        # else:
-        #     return sol[-1]
-        face_latent = sol[-1]
-        return face_latent
-        # upper_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        # hands_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        # lower_latent = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_upper = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_hands = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_lower = torch.zeros_like(face_latent).to(face_latent.device)
-        # classify_face = torch.zeros_like(face_latent).to(face_latent.device)
-        # return  {
-        #     "rec_face": face_latent,
-        #     "rec_upper": upper_latent,
-        #     "rec_hands": hands_latent,
-        #     "rec_lower": lower_latent,
-        #     "cls_face": classify_face,
-        #     "cls_upper": classify_upper,
-        #     "cls_hands": classify_hands,
-        #     "cls_lower": classify_lower,
-        # }
-    
         
     def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None):
         time_grid = torch.tensor([0.0, 1.0], device=audio.device)
-    
         # generate default mask and masked motion if not provided
         # length = audio.shape[1] * 30 // 16000
         length = masked_motion.shape[1]
@@ -701,15 +638,22 @@ class EmageAudioModel(PreTrainedModel):
             bs, t, _ = window_mask.shape
             x_init = torch.randn((bs, t, self.cfg.vae_codebook_size), dtype=torch.float32, device=window_mask.device)
             # print(self.cfg.ode_step_size)
-            face_latent = self.sample(
-                x_init, step_size=self.cfg.ode_step_size,
-                atol=self.cfg.ode_atol,
-                rtol=self.cfg.ode_rtol,
-                time_grid=time_grid,
-                audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
+            face_latent = self.forward(x_init, t, audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
             
+            if i == 0:
+                rec_all_face.append(face_latent[:, :-pre_frames, :])
+            else:
+                # blending 
+                blend_factor = 1 / (pre_frames + 2)
+                face_latent_to_blend = face_latent[:, :pre_frames, :]
+                last_motion_to_blend = window_motion[:, :pre_frames, :]
+                for i in range(pre_frames):
+                    blend_ratio = blend_factor * (i + 1)
+                    face_latent_to_blend[:, i, :] = (1 - blend_ratio) * face_latent_to_blend[:, i, :] + blend_ratio * last_motion_to_blend[:, i, :]
+                face_latent[:, :pre_frames, :] = face_latent_to_blend
+                rec_all_face.append(face_latent[:, :-pre_frames, :])
+                
             last_motion = face_latent[:, -pre_frames:, :]
-            rec_all_face.append(face_latent[:, :-pre_frames, :])
             # print(face_latent[:, :-pre_frames, :].shape)
 
         if remain > pre_frames:
@@ -729,13 +673,15 @@ class EmageAudioModel(PreTrainedModel):
             audio_slice = audio[:, final_start*(16000//30) : final_start*(16000//30)+audio_slice_len]
             bs, t, _ = final_mask.shape
             x_init = torch.randn((bs, t, self.cfg.vae_codebook_size), dtype=torch.float32, device=window_mask.device)
+            face_latent = self.forward(x_init, t, audio=audio_slice, speaker_id=speaker_id, masked_motion=final_motion, mask=final_mask, use_audio=True)
             
-            face_latent = self.sample(
-                x_init, step_size=self.cfg.ode_step_size,
-                atol=self.cfg.ode_atol,
-                rtol=self.cfg.ode_rtol,
-                time_grid=time_grid,
-                audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
+            blend_factor = 1 / (pre_frames + 2)
+            face_latent_to_blend = face_latent[:, :pre_frames, :]
+            last_motion_to_blend = final_motion[:, :pre_frames, :]
+            for i in range(pre_frames):
+                blend_ratio = blend_factor * (i + 1)
+                face_latent_to_blend[:, i, :] = (1 - blend_ratio) * face_latent_to_blend[:, i, :] + blend_ratio * last_motion_to_blend[:, i, :]
+            face_latent[:, :pre_frames, :] = face_latent_to_blend
             rec_all_face.append(face_latent)
             # print(face_latent.shape)
         rec_all_face = torch.cat(rec_all_face, dim=1) 
