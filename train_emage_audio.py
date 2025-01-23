@@ -331,14 +331,14 @@ def main(cfg):
               continue
            
             # test
-            # if iteration % cfg.validation.test_steps == 0 and local_rank == 0:
-            #     test_save_path = os.path.join(log_dir, f"test_{iteration}")
-            #     os.makedirs(test_save_path, exist_ok=True)
-            #     with torch.no_grad():
-            #         test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset)
-            #     if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
-            #     if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
-            #     if cfg.test: return 0
+            if iteration % cfg.validation.test_steps == 0 and local_rank == 0:
+                test_save_path = os.path.join(log_dir, f"test_{iteration}")
+                os.makedirs(test_save_path, exist_ok=True)
+                with torch.no_grad():
+                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset)
+                if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
+                if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
+                if cfg.test: return 0
 
             # validation
             # if iteration % cfg.validation.validation_steps == 0:

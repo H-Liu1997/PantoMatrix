@@ -76,7 +76,7 @@ noise_scheduler_kwargs:
   beta_schedule:       "linear"
   steps_offset:        1
   clip_sample:         false
-  prediction_type:     "sample"
+  prediction_type:     "v_prediction"
 
 solver:
   gradient_accumulation_steps: 1

@@ -9,6 +9,12 @@ from omegaconf import OmegaConf
 from utils import instantiate
 from tqdm import tqdm
 import moviepy.editor as mp
+import argparse
+
+args = argparse.ArgumentParser()
+args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_20250123-0306/test_64000")
+args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions/")
+args = args.parse_args()
 
 transform = T.Compose([
     T.Resize((512, 512), interpolation=T.InterpolationMode.BICUBIC),
@@ -16,10 +22,10 @@ transform = T.Compose([
     T.Normalize([0.5], [0.5])
 ])
     
-motion_latent_dir = "/home/weili/haiyang/outputs/infp_audio_20250121-1651/test_74000"
+motion_latent_dir = args.cache_dir
 gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent/"
 video_dir = "/mnt/weka/training_data_1/hdtf_full/videos_resampled/"
-save_path = "/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions/"
+save_path = args.save_dir
 os.makedirs(save_path, exist_ok=True)
 
 config = OmegaConf.load("/home/weili/haiyang/PantoMatrix/datasets/audio_head_animator.yaml")
@@ -49,6 +55,9 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
     source_img = load_video[0].asnumpy()
     source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda:2")
     # print(source_img.shape)
+    source_video = [img.asnumpy() for img in load_video]
+    source_video = torch.stack([transform(Image.fromarray(img)) for img in source_video]).to("cuda:2")
+    
     
     src_latent = gt_latent[0:1]
     # print(src_latent.shape, tgt_latent.shape)
@@ -76,16 +85,18 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
     video_pred = recon_imgs.permute(0, 2, 3, 1).cpu().numpy()
     video_gt = gt_recon_imgs.permute(0, 2, 3, 1).cpu().numpy()
     ref_img_original = source_img[0].permute(1, 2, 0).cpu().numpy()
+    source_video = source_video.permute(0, 2, 3, 1).cpu().numpy()
 
     # Normalize images to [0, 1] and scale to [0, 255] for saving
     video_pred = np.clip((video_pred + 1) / 2 * 255, 0, 255).astype("uint8")
     video_gt = np.clip((video_gt + 1) / 2 * 255, 0, 255).astype("uint8")
     ref_img_original = np.clip((ref_img_original + 1) / 2 * 255, 0, 255).astype("uint8")
+    source_video = np.clip((source_video + 1) / 2 * 255, 0, 255).astype("uint8")
 
     save_video_path = os.path.join(save_path, f"{file_name}_recon.mp4")
     with imageio.get_writer(save_video_path, fps=30) as writer:
         for i in range(len(video_pred)):
-            upper_row = np.concatenate([ref_img_original, video_gt[i]], axis=1)
+            upper_row = np.concatenate([source_video[i], video_gt[i]], axis=1)
             lower_row = np.concatenate([ref_img_original, video_pred[i]], axis=1)
             combined = np.concatenate([upper_row, lower_row], axis=0)
             writer.append_data(combined)
