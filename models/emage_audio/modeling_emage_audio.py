@@ -725,11 +725,12 @@ class EmageAudioModel(PreTrainedModel):
 
             window_mask = mask[:, start_idx:end_idx, :].clone()
             window_motion = masked_motion[:, start_idx:end_idx, :].clone()
-            window_motion[:, :pre_frames, :] = torch.where(
-                (window_mask[:, :pre_frames, :] == 0),
-                masked_motion[:, start_idx:start_idx+pre_frames, :],
-                last_motion,
-            )
+            window_motion[:, :pre_frames, :] = last_motion
+            # window_motion[:, :pre_frames, :] = torch.where(
+            #     (window_mask[:, :pre_frames, :] == 0),
+            #     masked_motion[:, start_idx:start_idx+pre_frames, :],
+            #     last_motion,
+            # )
             window_mask[:, :pre_frames, :] = 0
 
             audio_slice_len = (end_idx - start_idx)*(16000//30)
@@ -746,8 +747,19 @@ class EmageAudioModel(PreTrainedModel):
                 generator=generator,
                 audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
             
+            if i == 0:
+                rec_all_face.append(face_latent[:, :-pre_frames, :])
+            else:
+                # blending 
+                blend_factor = 1 / (pre_frames + 2)
+                face_latent_to_blend = face_latent[:, :pre_frames, :]
+                last_motion_to_blend = window_motion[:, :pre_frames, :]
+                for i in range(pre_frames):
+                    blend_ratio = blend_factor * (i + 1)
+                    face_latent_to_blend[:, i, :] = (1 - blend_ratio) * face_latent_to_blend[:, i, :] + blend_ratio * last_motion_to_blend[:, i, :]
+                face_latent[:, :pre_frames, :] = face_latent_to_blend
+                rec_all_face.append(face_latent[:, :-pre_frames, :])
             last_motion = face_latent[:, -pre_frames:, :]
-            rec_all_face.append(face_latent[:, :-pre_frames, :])
             # print(face_latent[:, :-pre_frames, :].shape)
 
         if remain > pre_frames:
@@ -756,11 +768,12 @@ class EmageAudioModel(PreTrainedModel):
 
             final_mask = mask[:, final_start:final_end, :].clone()
             final_motion = masked_motion[:, final_start:final_end, :].clone()
-            final_motion[:, :pre_frames, :] = torch.where(
-                (final_mask[:, :pre_frames, :] == 0),
-                masked_motion[:, final_start:final_start+pre_frames, :],
-                last_motion,
-            )
+            final_motion[:, :pre_frames, :] = last_motion
+            # torch.where(
+            #     (final_mask[:, :pre_frames, :] == 0),
+            #     masked_motion[:, final_start:final_start+pre_frames, :],
+            #     last_motion,
+            # )
             final_mask[:, :pre_frames, :] = 0
 
             audio_slice_len = (final_end - final_start)*(16000//30)
@@ -774,8 +787,15 @@ class EmageAudioModel(PreTrainedModel):
                 device=audio.device,
                 generator=generator,
                 audio=audio_slice, speaker_id=speaker_id, masked_motion=final_motion, mask=final_mask, use_audio=True)
+            
+            blend_factor = 1 / (pre_frames + 2)
+            face_latent_to_blend = face_latent[:, :pre_frames, :]
+            last_motion_to_blend = final_motion[:, :pre_frames, :]
+            for i in range(pre_frames):
+                blend_ratio = blend_factor * (i + 1)
+                face_latent_to_blend[:, i, :] = (1 - blend_ratio) * face_latent_to_blend[:, i, :] + blend_ratio * last_motion_to_blend[:, i, :]
+            face_latent[:, :pre_frames, :] = face_latent_to_blend
             rec_all_face.append(face_latent)
-            # print(face_latent.shape)
         rec_all_face = torch.cat(rec_all_face, dim=1) 
         # print(rec_all_face.shape)
         return rec_all_face

@@ -243,7 +243,7 @@ def main(cfg):
     motion_vq.eval()
     
     if cfg.test:
-        model = EmageAudioModel.from_pretrained("/content/drive/MyDrive/weights/emage3/best").to(device) 
+        model = EmageAudioModel.from_pretrained("/home/weili/haiyang/outputs/infp_audio_longer_20250124-1224/checkpoints/test_best").to(device) 
     else:
         model = init_hf_class(cfg.model.name_pyfile, cfg.model.class_name, cfg.model).to(device)
   
@@ -302,6 +302,7 @@ def main(cfg):
         iteration = 0
     if cfg.test:
         iteration = 0
+        
 
     max_epochs = (cfg.solver.max_train_steps // len(train_loader)) + (1 if cfg.solver.max_train_steps % len(train_loader) != 0 else 0)
     start_epoch = iteration // len(train_loader)

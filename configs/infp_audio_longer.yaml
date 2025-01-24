@@ -35,7 +35,7 @@ model:
   speaker_f: 768
   speaker_dims: 1
   hidden_size: 768
-  seed_frames: 4 
+  seed_frames: 16 
   pose_length: 64
   stride: 20
   test_length: 64
