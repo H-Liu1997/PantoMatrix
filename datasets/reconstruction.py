@@ -12,7 +12,7 @@ import moviepy.editor as mp
 import argparse
 
 args = argparse.ArgumentParser()
-args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_20250123-0306/test_64000")
+args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_e_20250123-1759/test_100000")
 args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions/")
 args = args.parse_args()
 
@@ -33,7 +33,7 @@ module = instantiate(config.model, instantiate_module=False)
 model = module(config=config)
 checkpoint = torch.load(config.resume_ckpt)
 model.load_state_dict(checkpoint["state_dict"], strict=False)
-model.eval().to("cuda:2")
+model.eval().to("cuda:4")
 print(f'Load weight from {config.resume_ckpt}')
 motion_encoder = model.motion_encoder
 flow_estimator = model.flow_estimator
@@ -45,18 +45,18 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
         continue
     file_name = latent_file[:-15]
     gt_latent = np.load(os.path.join(gt_latent_dir, file_name + ".npz"), allow_pickle=True)["random_data"]
-    gt_latent = torch.from_numpy(gt_latent).to("cuda:2")
+    gt_latent = torch.from_numpy(gt_latent).to("cuda:4")
     tgt_latent = np.load(os.path.join(motion_latent_dir, latent_file))
-    tgt_latent = torch.from_numpy(tgt_latent).to("cuda:2").squeeze(0).float()
+    tgt_latent = torch.from_numpy(tgt_latent).to("cuda:4").squeeze(0).float()
     print(tgt_latent.shape)
     
     aligned_video = os.path.join(video_dir, file_name + ".mp4")
     load_video = VideoReader(aligned_video)
     source_img = load_video[0].asnumpy()
-    source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda:2")
+    source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda:4")
     # print(source_img.shape)
     source_video = [img.asnumpy() for img in load_video]
-    source_video = torch.stack([transform(Image.fromarray(img)) for img in source_video]).to("cuda:2")
+    source_video = torch.stack([transform(Image.fromarray(img)) for img in source_video]).to("cuda:4")
     
     
     src_latent = gt_latent[0:1]
