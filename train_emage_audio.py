@@ -243,7 +243,7 @@ def main(cfg):
     motion_vq.eval()
     
     if cfg.test:
-        model = EmageAudioModel.from_pretrained("/home/weili/haiyang/outputs/infp_audio_longer_20250124-1224/checkpoints/test_best").to(device) 
+        model = EmageAudioModel.from_pretrained("/home/weili/haiyang/outputs/infp_audio_longer_20250124-0725/checkpoints/test_best").to(device) 
     else:
         model = init_hf_class(cfg.model.name_pyfile, cfg.model.class_name, cfg.model).to(device)
   

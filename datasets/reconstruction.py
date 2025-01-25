@@ -12,7 +12,7 @@ import moviepy.editor as mp
 import argparse
 
 args = argparse.ArgumentParser()
-args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_longer_20250124-0725/test_200000")
+args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_longer_20250124-0725/test_100000")
 args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions/")
 args = args.parse_args()
 
