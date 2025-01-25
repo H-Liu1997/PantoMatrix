@@ -643,6 +643,10 @@ class EmageAudioModel(PreTrainedModel):
         self.mask_embedding = nn.Parameter(torch.zeros(1,1,self.cfg.vae_codebook_size))
         nn.init.normal_(self.mask_embedding, 0, self.cfg.hidden_size**-0.5)
         
+        # motion memory
+        self.memory_bank = nn.Parameter(torch.zeros(1, 64, self.cfg.hidden_size))
+        nn.init.normal_(self.memory_bank, 0, self.cfg.hidden_size**-0.5)
+        
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
         # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
@@ -663,6 +667,8 @@ class EmageAudioModel(PreTrainedModel):
         self.time_embed = TimestepEncoding(self.cfg.hidden_size)
         
         self.inference_pipeline = Pose2PosePipeline(model=self)
+        self.cross_attn = CrossAttention(self.cfg.hidden_size, self.cfg.hidden_size, 1, 0.1)
+        self.norm = nn.LayerNorm(self.cfg.hidden_size)
         
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
         # mask motion
@@ -688,8 +694,15 @@ class EmageAudioModel(PreTrainedModel):
         masked_motion = self.input_up_2(masked_motion[:,:self.cfg.seed_frames])
         x = self.input_up(x)
         x = self.position_embeddings(x)
+        
+        # assume audio_feature is normalized
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
+        motion_memory = self.memory_bank.repeat(bs, 1, 1)
+        audio2face_fea_proj = self.cross_attn(audio2face_fea_proj, motion_memory)
+        audio2face_fea_proj = self.norm(audio2face_fea_proj)
+        audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
+        
         decode_face = x
         # decode_face = self.face_motion_cross_audio(x, audio2face_fea_proj, emb)
         for decoder_layer in self.face_motion_cross_audio:
