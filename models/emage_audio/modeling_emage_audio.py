@@ -177,6 +177,9 @@ class FilmTransformerDecoderLayer(nn.Module):
         self.cross_attn = CrossAttention(d_model, d_cond, num_heads, dropout)
         self.film2 = FiLM(d_model)
         self.norm3 = nn.LayerNorm(d_model)
+        self.cross_attn_2 = CrossAttention(d_model, d_cond, num_heads, dropout)
+        self.film2_2 = FiLM(d_model)
+        self.norm4 = nn.LayerNorm(d_model)
         self.feedforward = FeedforwardBlock(d_model, d_feedforward, dropout)
         self.film3 = FiLM(d_model)
 
@@ -189,6 +192,7 @@ class FilmTransformerDecoderLayer(nn.Module):
         target_key_padding_mask: torch.Tensor = None,
         cross_cond_mask: torch.Tensor = None,
         cross_cond_key_padding_mask: torch.Tensor = None,
+        cross_cond_2: torch.Tensor = None,
     ):
         """
         :param x: B x T x d_model tensor
@@ -202,6 +206,10 @@ class FilmTransformerDecoderLayer(nn.Module):
             self.norm2(x), cross_cond, cross_cond_mask, cross_cond_key_padding_mask
         )
         x = x + self.film2(x2, film_cond)
+        x2 = self.cross_attn_2(
+            self.norm4(x), cross_cond_2, cross_cond_mask, cross_cond_key_padding_mask
+        )
+        x = x + self.film2_2(x2, film_cond)
         x3 = self.feedforward(self.norm3(x))
         x = x + self.film3(x3, film_cond)
         return x
@@ -638,7 +646,8 @@ class EmageAudioModel(PreTrainedModel):
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
         # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
-        self.input_up = nn.Linear(self.cfg.vae_codebook_size*2, self.cfg.hidden_size)
+        self.input_up = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
+        self.input_up_2 = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
         self.audio_face_motion_proj = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size)
         # self.face_motion_cross_audio = nn.TransformerDecoder(self.audio_motion_cross_attn_layer, num_layers=4)
         self.face_motion_cross_audio = nn.ModuleList(
@@ -675,7 +684,8 @@ class EmageAudioModel(PreTrainedModel):
         emb = self.time_embed(t).unsqueeze(1).repeat(1,n,1)
         # print(emb.shape, audio2face_fea.shape)
         # speaker_face_fea_proj = self.speaker_embedding_face(speaker_id)
-        x = torch.cat([x, masked_motion], dim=2)
+        # x = torch.cat([x, masked_motion], dim=2)
+        masked_motion = self.input_up_2(masked_motion[:,:self.cfg.seed_frames])
         x = self.input_up(x)
         x = self.position_embeddings(x)
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
@@ -687,6 +697,7 @@ class EmageAudioModel(PreTrainedModel):
                 decode_face,
                 audio2face_fea_proj,
                 emb,
+                cross_cond_2=masked_motion,
             )
         face_latent = self.face_out_proj(decode_face)
         return face_latent
