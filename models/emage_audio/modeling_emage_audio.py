@@ -670,9 +670,15 @@ class EmageAudioModel(PreTrainedModel):
         self.cross_attn = CrossAttention(self.cfg.hidden_size, self.cfg.hidden_size, 1, 0.1)
         self.norm = nn.LayerNorm(self.cfg.hidden_size)
         
+        self.in_up_3 = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
+        self.style_encoder_layer = nn.TransformerEncoderLayer(d_model=self.cfg.hidden_size, nhead=4, dim_feedforward=self.cfg.hidden_size*2)
+        self.style_encoder = nn.TransformerEncoder(self.style_encoder_layer, num_layers=2)
+        self.film_style = FiLM(self.cfg.hidden_size)
+        
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
         # mask motion
         # masked_embeddings = self.mask_embedding.expand_as(masked_motion) # bs, n, d
+        style_motion = masked_motion
         masked_motion = torch.where(mask==1, 0.0, masked_motion) # frist 4 is gt
         
         audio_list = [i.cpu().numpy() for i in audio]
@@ -683,6 +689,13 @@ class EmageAudioModel(PreTrainedModel):
         if audio2face_fea.shape[1] > n:
           audio2face_fea = audio2face_fea[:, :n]
         masked_motion = masked_motion[:, :n]
+        style_motion = style_motion[:, :n]
+        
+        # style encoder
+        style_motion = self.in_up_3(style_motion)
+        style_motion = self.position_embeddings(style_motion)
+        style_motion = self.style_encoder(style_motion)
+        style_vec = style_motion[:, 0:1] # bs, 1, d
         # print(masked_motion.shape, x.shape)
         if t.dim() == 0:
             t = t.unsqueeze(0)
@@ -699,6 +712,7 @@ class EmageAudioModel(PreTrainedModel):
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
         motion_memory = self.memory_bank.repeat(bs, 1, 1)
+        motion_memory = self.film_style(motion_memory, style_vec)
         audio2face_fea_proj = self.cross_attn(audio2face_fea_proj, motion_memory)
         audio2face_fea_proj = self.norm(audio2face_fea_proj)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)

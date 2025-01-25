@@ -35,7 +35,7 @@ model:
   speaker_f: 768
   speaker_dims: 1
   hidden_size: 768
-  seed_frames: 4 
+  seed_frames: 8 
   pose_length: 64
   stride: 20
   test_length: 64
@@ -76,17 +76,17 @@ noise_scheduler_kwargs:
   beta_schedule:       "linear"
   steps_offset:        1
   clip_sample:         false
-  prediction_type:     "epsilon"
+  prediction_type:     "sample"
 
 solver:
   gradient_accumulation_steps: 1
   gradient_checkpointing: False 
-  max_train_steps: 100000
+  max_train_steps: 200000
   max_grad_norm: 0.99
   # lr
   learning_rate: 2e-5
   scale_lr: False 
-  lr_warmup_steps: 100
+  lr_warmup_steps: 1000
   lr_scheduler: 'constant'
   # optimizer
   use_8bit_adam: False 
