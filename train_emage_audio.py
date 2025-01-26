@@ -93,6 +93,7 @@ def denoising_loss_fn(cfg, model_pred, target, noise_scheduler, timesteps):
 
 # ---------------------------------  train,val,test fn here --------------------------------- #
 def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
+    steps = kwargs["steps"]
     train_dataset = kwargs["train_dataset"]
     noise_scheduler = kwargs["noise_scheduler"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
@@ -135,6 +136,11 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     }
     time_cost = time.time() - start_time
     print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
+    save_video_dir = os.path.join(save_path, 'reconstruct')
+    os.system(f"python ./datasets/reconstruction.py --cache_dir {save_path} --save_dir {save_video_dir}")
+    for save_file in os.listdir(save_video_dir):
+        if save_file.endswith("_final.mp4"):
+            wandb.log({"test/videos": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
     return test_list, save_list, metrics
 
 def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
@@ -229,18 +235,19 @@ def main(cfg):
         )
 
     # init
-    face_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/face").to(device)
-    upper_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/upper").to(device)
-    lower_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/lower").to(device)
-    hands_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/hands").to(device)
-    global_motion_ae = EmageVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/global").to(device)
-    motion_vq = EmageVQModel(
-      face_model=face_motion_vq, upper_model=upper_motion_vq,
-      lower_model=lower_motion_vq, hands_model=hands_motion_vq,
-      global_model=global_motion_ae).to(device)
-    for param in motion_vq.parameters():
-        param.requires_grad = False
-    motion_vq.eval()
+    # face_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/face").to(device)
+    # upper_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/upper").to(device)
+    # lower_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/lower").to(device)
+    # hands_motion_vq = EmageVQVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/hands").to(device)
+    # global_motion_ae = EmageVAEConv.from_pretrained("H-Liu1997/emage_audio", subfolder="emage_vq/global").to(device)
+    # motion_vq = EmageVQModel(
+    #   face_model=face_motion_vq, upper_model=upper_motion_vq,
+    #   lower_model=lower_motion_vq, hands_model=hands_motion_vq,
+    #   global_model=global_motion_ae).to(device)
+    # for param in motion_vq.parameters():
+    #     param.requires_grad = False
+    # motion_vq.eval()
+    motion_vq = None
     
     if cfg.test:
         model = EmageAudioModel.from_pretrained("/home/weili/haiyang/outputs/infp_audio_longer_20250124-0725/checkpoints/test_best").to(device) 
@@ -336,7 +343,8 @@ def main(cfg):
                 test_save_path = os.path.join(log_dir, f"test_{iteration}")
                 os.makedirs(test_save_path, exist_ok=True)
                 with torch.no_grad():
-                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset)
+                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, 
+                                                                 motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset, steps=iteration)
                 if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
                 if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
                 if cfg.test: return 0

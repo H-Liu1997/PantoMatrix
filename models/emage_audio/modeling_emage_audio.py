@@ -16,6 +16,7 @@ import inspect
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers import DiffusionPipeline
 
+
 class TimestepEncoding(nn.Module):
     def __init__(self, embedding_dim: int):
         super().__init__()
@@ -644,8 +645,8 @@ class EmageAudioModel(PreTrainedModel):
         nn.init.normal_(self.mask_embedding, 0, self.cfg.hidden_size**-0.5)
         
         # motion memory
-        self.memory_bank = nn.Parameter(torch.zeros(1, 64, self.cfg.hidden_size))
-        nn.init.normal_(self.memory_bank, 0, self.cfg.hidden_size**-0.5)
+        # self.memory_bank = nn.Parameter(torch.zeros(1, 64, self.cfg.hidden_size))
+        # nn.init.normal_(self.memory_bank, 0, self.cfg.hidden_size**-0.5)
         
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
         # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
@@ -673,7 +674,18 @@ class EmageAudioModel(PreTrainedModel):
         self.in_up_3 = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
         self.style_encoder_layer = nn.TransformerEncoderLayer(d_model=self.cfg.hidden_size, nhead=4, dim_feedforward=self.cfg.hidden_size*2)
         self.style_encoder = nn.TransformerEncoder(self.style_encoder_layer, num_layers=2)
-        self.film_style = FiLM(self.cfg.hidden_size)
+        self.film_style = FiLM(self.cfg.hidden_size//2)
+        
+        self.memory_base = nn.Parameter(torch.zeros(1, 64, self.cfg.hidden_size//2))
+        self.memory_style = nn.Parameter(torch.zeros(1, 64, self.cfg.hidden_size//2))
+        nn.init.kaiming_normal_(self.memory_base, mode='fan_out', nonlinearity='relu')
+        nn.init.uniform_(self.memory_style, -0.1, 0.1) 
+        self.feature_fusion = nn.Sequential(
+            nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size*2),
+            nn.GELU(),
+            nn.Linear(self.cfg.hidden_size*2, self.cfg.hidden_size)
+        )
+        self.style_down = nn.Linear(self.cfg.hidden_size, self.cfg.hidden_size//2)
         
     def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
         # mask motion
@@ -696,6 +708,7 @@ class EmageAudioModel(PreTrainedModel):
         style_motion = self.position_embeddings(style_motion)
         style_motion = self.style_encoder(style_motion)
         style_vec = style_motion[:, 0:1] # bs, 1, d
+        style_vec = self.style_down(style_vec)
         # print(masked_motion.shape, x.shape)
         if t.dim() == 0:
             t = t.unsqueeze(0)
@@ -711,8 +724,15 @@ class EmageAudioModel(PreTrainedModel):
         # assume audio_feature is normalized
         audio2face_fea_proj = self.audio_face_motion_proj(audio2face_fea)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
-        motion_memory = self.memory_bank.repeat(bs, 1, 1)
-        motion_memory = self.film_style(motion_memory, style_vec)
+        base_memory = self.memory_base.repeat(bs, 1, 1)  # [B,64,d/2]
+        # print(self.memory_style.repeat(bs,1,1).shape, style_vec.repeat(1,n,1).shape)
+        style_memory = self.film_style(
+            self.memory_style.repeat(bs,1,1), 
+            style_vec.repeat(1,64,1), 
+        )
+        motion_memory = torch.cat([base_memory, style_memory], dim=-1)  # [B,64,d]
+        motion_memory = self.feature_fusion(motion_memory)
+        
         audio2face_fea_proj = self.cross_attn(audio2face_fea_proj, motion_memory)
         audio2face_fea_proj = self.norm(audio2face_fea_proj)
         audio2face_fea_proj = self.position_embeddings(audio2face_fea_proj)
