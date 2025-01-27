@@ -93,6 +93,7 @@ def denoising_loss_fn(cfg, model_pred, target, noise_scheduler, timesteps):
 
 # ---------------------------------  train,val,test fn here --------------------------------- #
 def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
+    steps = kwargs["steps"]
     train_dataset = kwargs["train_dataset"]
     noise_scheduler = kwargs["noise_scheduler"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
@@ -118,8 +119,12 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
         motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
         bs, t, _ = motion_latent.shape
         motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
+        if steps % 10000 == 0:
+            style_motion = motion_latent
+        else:
+            style_motion = None
         motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
-                                                    noise_scheduler=noise_scheduler)  
+                                                    noise_scheduler=noise_scheduler, style_motion=style_motion)  
         
         # motion_latent_pred = train_dataset.inverse_normalize(motion=motion_latent_pred,mean=train_dataset.mean,std=train_dataset.std)
         # motion_latent = train_dataset.inverse_normalize(motion=motion_latent,mean=train_dataset.mean,std=train_dataset.std)
@@ -135,6 +140,11 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     }
     time_cost = time.time() - start_time
     print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
+    save_video_dir = os.path.join(save_path, 'reconstruct')
+    os.system(f"python ./datasets/reconstruction.py --cache_dir {save_path} --save_dir {save_video_dir}")
+    for save_file in os.listdir(save_video_dir):
+        if save_file.endswith("_final.mp4"):
+            wandb.log({"test/videos": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
     return test_list, save_list, metrics
 
 def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
@@ -178,8 +188,13 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     noisy_latents = noise_scheduler.add_noise(
             latents, noise, timesteps
     )
-
-    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True)
+    
+    if torch.rand(1) < 0.3:
+        style_motion = None
+    else:
+        style_motion = motion_latent
+        
+    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True, style_motion=style_motion)
     if noise_scheduler.prediction_type == "epsilon":
         target = noise
     elif noise_scheduler.prediction_type == "v_prediction":
@@ -336,7 +351,8 @@ def main(cfg):
                 test_save_path = os.path.join(log_dir, f"test_{iteration}")
                 os.makedirs(test_save_path, exist_ok=True)
                 with torch.no_grad():
-                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path, motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset)
+                    test_list, save_list, metrics = inference_fn(cfg.model, model, device, cfg.data.test_meta_paths, test_save_path,
+                                                                 motion_vq=motion_vq, noise_scheduler=val_noise_scheduler, train_dataset=train_dataset, steps=iteration)
                 if cfg.validation.visualization: visualization_fn(save_list, test_save_path, test_list, only_check_one=True)
                 if cfg.validation.evaluation: best_fgd_test, best_fgd_iteration_test =  log_test(model, metrics, iteration, best_fgd_test, best_fgd_iteration_test, cfg, local_rank, experiment_ckpt_dir, test_save_path)
                 if cfg.test: return 0

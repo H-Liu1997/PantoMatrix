@@ -609,7 +609,7 @@ class Pose2PosePipeline(DiffusionPipeline):
                 )
                 noise_pred = self.model(
                     x=latent_model_input, t=t_batch, audio=model_extras["audio"], 
-                    speaker_id=model_extras["speaker_id"], masked_motion=model_extras["masked_motion"], mask=model_extras["mask"],
+                    speaker_id=model_extras["speaker_id"], masked_motion=model_extras["masked_motion"], mask=model_extras["mask"], style_motion=model_extras["style_motion"],
                     use_audio=True)
                 # Compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(
@@ -672,13 +672,13 @@ class EmageAudioModel(PreTrainedModel):
         
         self.in_up_3 = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)
         self.style_encoder_layer = nn.TransformerEncoderLayer(d_model=self.cfg.hidden_size, nhead=4, dim_feedforward=self.cfg.hidden_size*2)
-        self.style_encoder = nn.TransformerEncoder(self.style_encoder_layer, num_layers=2)
+        self.style_encoder = nn.TransformerEncoder(self.style_encoder_layer, num_layers=4)
         self.film_style = FiLM(self.cfg.hidden_size)
         
-    def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True):
+    def forward(self, x, t, audio=None, speaker_id=None, masked_motion=None, mask=None, use_audio=True, style_motion=None):
         # mask motion
         # masked_embeddings = self.mask_embedding.expand_as(masked_motion) # bs, n, d
-        style_motion = masked_motion
+        # style_motion = masked_motion
         masked_motion = torch.where(mask==1, 0.0, masked_motion) # frist 4 is gt
         
         audio_list = [i.cpu().numpy() for i in audio]
@@ -689,13 +689,18 @@ class EmageAudioModel(PreTrainedModel):
         if audio2face_fea.shape[1] > n:
           audio2face_fea = audio2face_fea[:, :n]
         masked_motion = masked_motion[:, :n]
-        style_motion = style_motion[:, :n]
         
         # style encoder
-        style_motion = self.in_up_3(style_motion)
-        style_motion = self.position_embeddings(style_motion)
-        style_motion = self.style_encoder(style_motion)
-        style_vec = style_motion[:, 0:1] # bs, 1, d
+        if style_motion is not None:
+            style_motion = style_motion[:, :n]
+            style_motion = self.in_up_3(style_motion)
+            style_motion = self.position_embeddings(style_motion)
+            style_motion = self.style_encoder(style_motion)
+            style_vec = torch.mean(style_motion, dim=1).unsqueeze(1)
+        else:
+            style_vec = torch.zeros(bs, 1, self.cfg.hidden_size).to(x.device)
+            
+        # print(style_vec.shape)
         # print(masked_motion.shape, x.shape)
         if t.dim() == 0:
             t = t.unsqueeze(0)
@@ -729,7 +734,7 @@ class EmageAudioModel(PreTrainedModel):
         face_latent = self.face_out_proj(decode_face)
         return face_latent
 
-    def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None, noise_scheduler=None):
+    def inference(self, audio, speaker_id, vq_model=None, masked_motion=None, mask=None, noise_scheduler=None, style_motion=None):
         self.inference_pipeline.setup_scheduler(noise_scheduler)
         # generate default mask and masked motion if not provided
         # length = audio.shape[1] * 30 // 16000
@@ -770,6 +775,7 @@ class EmageAudioModel(PreTrainedModel):
             #     last_motion,
             # )
             window_mask[:, :pre_frames, :] = 0
+            window_style_motion = style_motion[:, start_idx:end_idx, :].clone() if style_motion is not None else None
 
             audio_slice_len = (end_idx - start_idx)*(16000//30)
             audio_slice = audio[:, start_idx*(16000//30) : start_idx*(16000//30)+audio_slice_len]
@@ -783,7 +789,7 @@ class EmageAudioModel(PreTrainedModel):
                 scheduler=noise_scheduler,
                 device=audio.device,
                 generator=generator,
-                audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True)
+                audio=audio_slice, speaker_id=speaker_id, masked_motion=window_motion, mask=window_mask, use_audio=True, style_motion=window_style_motion)
             
             if i == 0:
                 rec_all_face.append(face_latent[:, :-pre_frames, :])
@@ -813,6 +819,7 @@ class EmageAudioModel(PreTrainedModel):
             #     last_motion,
             # )
             final_mask[:, :pre_frames, :] = 0
+            window_style_motion = style_motion[:, final_start:final_end, :].clone() if style_motion is not None else None
 
             audio_slice_len = (final_end - final_start)*(16000//30)
             audio_slice = audio[:, final_start*(16000//30) : final_start*(16000//30)+audio_slice_len]
@@ -824,7 +831,7 @@ class EmageAudioModel(PreTrainedModel):
                 scheduler=noise_scheduler,
                 device=audio.device,
                 generator=generator,
-                audio=audio_slice, speaker_id=speaker_id, masked_motion=final_motion, mask=final_mask, use_audio=True)
+                audio=audio_slice, speaker_id=speaker_id, masked_motion=final_motion, mask=final_mask, use_audio=True, style_motion=window_style_motion)
             
             blend_factor = 1 / (pre_frames + 2)
             face_latent_to_blend = face_latent[:, :pre_frames, :]
