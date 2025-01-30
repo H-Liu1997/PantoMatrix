@@ -98,15 +98,83 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     noise_scheduler = kwargs["noise_scheduler"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     actual_model.eval()
+    
+    wild_save_path = os.path.join(save_path, "wild")
+    os.makedirs(wild_save_path, exist_ok=True)
     test_list = []
     for data_meta_path in test_path:
         test_list.extend(json.load(open(data_meta_path, "r")))
-    test_list = [item for item in test_list if item.get("mode") == "test"]
+    test_list = [item for item in test_list if item.get("mode") == "test_wild"]
     seen_ids = set()
     test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
-
+    # single id test
     save_list = []
     start_time = time.time()
+    total_length = 0
+    test_loss = 0
+    counter = 0
+    # hard coding here
+    style_path_1 = "./HDTF/cache_latent/WDA_AlexandriaOcasioCortez_000_000.npz"
+    style_path_2 = "./HDTF/cache_latent/RD_Radio10_000_000.npz"
+    ref_video_id_1 = "WDA_AlexandriaOcasioCortez_000_000"
+    ref_video_id_2 = "RD_Radio10_000_000"
+    for test_file in tqdm(test_list, desc="Testing"):
+        # counter += 1
+        # if counter == 9: break
+        if ref_video_id_2 not in test_file["video_id"] and ref_video_id_1 not in test_file["video_id"]:
+            continue
+        audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
+        audio = torch.from_numpy(audio).to(device).unsqueeze(0)
+        speaker_id = torch.zeros(1,1).to(device).long()
+
+        # motion seed
+        motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
+        motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
+        bs, t, _ = motion_latent.shape
+        motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
+        
+        # three different ways to generate motion
+        style_motion = None
+        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
+                                                    noise_scheduler=noise_scheduler, style_motion=style_motion)  
+        
+        style_motion = motion_latent
+        self_style_motion_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
+                                                    noise_scheduler=noise_scheduler, style_motion=style_motion)
+        
+        style_path = style_path_1 if ref_video_id_2 in test_file["video_id"] else style_path_2
+        ref_video_id = ref_video_id_1 if ref_video_id_2 in test_file["video_id"] else ref_video_id_2
+        cross_motion_latent = np.load(style_path, allow_pickle=True)["random_data"]
+        cross_motion_latent = torch.from_numpy(cross_motion_latent).to(device).unsqueeze(0)
+        style_motion = cross_motion_latent
+        cross_style_motion_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
+                                                    noise_scheduler=noise_scheduler, style_motion=style_motion)
+        
+        # calculate loss
+        current_loss = torch.abs(motion_latent - self_style_motion_pred).mean()
+        test_loss += current_loss * t
+        np.savez(os.path.join(wild_save_path, f"{test_file['video_id']}_output.npz"), 
+                    no_style=motion_latent_pred.cpu().numpy(), 
+                    self_style=self_style_motion_pred.cpu().numpy(),
+                    cross_style=cross_style_motion_pred.cpu().numpy(),
+                    ref_style=cross_motion_latent.cpu().numpy(),
+                    ref_video_id=ref_video_id,
+                    gt_video_id=test_file["video_id"])
+        total_length+=t
+    metrics = {
+        "latent_l1": test_loss.cpu().numpy()/total_length
+    }
+    time_cost = time.time() - start_time
+    print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
+    
+    audio_only_save_path = os.path.join(save_path, "audio_only")
+    os.makedirs(audio_only_save_path, exist_ok=True)
+    test_list = []
+    for data_meta_path in test_path:
+        test_list.extend(json.load(open(data_meta_path, "r")))
+    test_list = [item for item in test_list if item.get("mode") == "test_audio_only"]
+    seen_ids = set()
+    test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
     total_length = 0
     test_loss = 0
     for test_file in tqdm(test_list, desc="Testing"):
@@ -125,26 +193,67 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
             style_motion = None
         motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
                                                     noise_scheduler=noise_scheduler, style_motion=style_motion)  
-        
-        # motion_latent_pred = train_dataset.inverse_normalize(motion=motion_latent_pred,mean=train_dataset.mean,std=train_dataset.std)
-        # motion_latent = train_dataset.inverse_normalize(motion=motion_latent,mean=train_dataset.mean,std=train_dataset.std)
-        
-        # calcucate loss
         current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
         test_loss += current_loss * t
-        
-        np.save(os.path.join(save_path, f"{test_file['video_id']}_output.npz"), motion_latent_pred.cpu().numpy())
+        np.save(os.path.join(audio_only_save_path, f"{test_file['video_id']}_output.npz"), motion_latent_pred.cpu().numpy())
         total_length+=t
-    metrics = {
-        "latent_l1": test_loss.cpu().numpy()/total_length
-    }
-    time_cost = time.time() - start_time
-    print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
-    save_video_dir = os.path.join(save_path, 'reconstruct')
-    os.system(f"python ./datasets/reconstruction.py --cache_dir {save_path} --save_dir {save_video_dir}")
+    metrics.update({
+        "latent_l1_audio_only": test_loss.cpu().numpy()/total_length
+    })
+    
+    trained_save_path = os.path.join(save_path, "trained")
+    os.makedirs(trained_save_path, exist_ok=True)
+    test_list = []
+    for data_meta_path in test_path:
+        test_list.extend(json.load(open(data_meta_path, "r")))
+    test_list = [item for item in test_list if item.get("mode") == "test_trained"]
+    seen_ids = set()
+    test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
+    total_length = 0
+    test_loss = 0
+    for test_file in tqdm(test_list, desc="Testing"):
+        audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
+        audio = torch.from_numpy(audio).to(device).unsqueeze(0)
+        speaker_id = torch.zeros(1,1).to(device).long()
+
+        # motion seed
+        motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
+        motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
+        bs, t, _ = motion_latent.shape
+        motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
+        if steps % 10000 == 0:
+            style_motion = motion_latent
+        else:
+            style_motion = None
+        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
+                                                    noise_scheduler=noise_scheduler, style_motion=style_motion)  
+        current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
+        test_loss += current_loss * t
+        np.save(os.path.join(trained_save_path, f"{test_file['video_id']}_output.npz"), motion_latent_pred.cpu().numpy())
+        total_length+=t
+    metrics.update({
+        "latent_l1_trained": test_loss.cpu().numpy()/total_length
+    })
+    
+    # other test
+    save_video_dir = os.path.join(wild_save_path, 'cross_reconstruct')
+    os.system(f"python ./datasets/cross_reconstruction.py --cache_dir {wild_save_path} --save_dir {save_video_dir}")
     for save_file in os.listdir(save_video_dir):
         if save_file.endswith("_final.mp4"):
-            wandb.log({"test/videos": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
+            wandb.log({"test/videos_wild": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
+            
+    save_video_dir = os.path.join(audio_only_save_path, 'reconstruct')
+    os.system(f"python ./datasets/reconstruction.py --cache_dir {audio_only_save_path} --save_dir {save_video_dir}")
+    for save_file in os.listdir(save_video_dir):
+        if save_file.endswith("_final.mp4"):
+            wandb.log({"test/videos_audio_only": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
+    
+    save_video_dir = os.path.join(trained_save_path, 'reconstruct')
+    os.system(f"python ./datasets/reconstruction.py --cache_dir {trained_save_path} --save_dir {save_video_dir}")
+    for save_file in os.listdir(save_video_dir):
+        if save_file.endswith("_final.mp4"):
+            wandb.log({"test/videos_trained": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
+            
     return test_list, save_list, metrics
 
 def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
@@ -157,6 +266,7 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     audio = batch["audio"].to(device)
     # audio_lis = batch["audio_lis"].to(device)
     motion_latent = batch["motion_latent"].to(device)
+    style_latent = batch["style_latent"].to(device)
 
     bs, t, jc = motion_latent.shape
     j = jc // 3
@@ -192,7 +302,7 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     if torch.rand(1) < 0.3:
         style_motion = None
     else:
-        style_motion = motion_latent
+        style_motion = style_latent
         
     motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True, style_motion=style_motion)
     if noise_scheduler.prediction_type == "epsilon":

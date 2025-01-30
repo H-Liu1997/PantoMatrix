@@ -15,9 +15,9 @@ data:
   class_name: "BEAT2DatasetEamgeFootContact"
   train_bs: 32
   meta_paths:
-    - "./datasets/data_json/infp_s20_l64_short15.json"
+    - "./datasets/data_json/infp_s20_l64_kw2_na2.json"
   test_meta_paths: 
-    - "./datasets/data_json/infp_s20_l64_short15.json"
+    - "./datasets/data_json/infp_s20_l64_kw2_na2.json"
   pose_norm: False
   
 model:
