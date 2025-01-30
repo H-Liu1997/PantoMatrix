@@ -126,3 +126,41 @@ class BEAT2DatasetEamgeFootContact(BEAT2Dataset):
             audio=audio_tensor, 
             style_latent=ref_motion_tensor,
         )
+        
+        
+class BEAT2DatasetEamgeFix(BEAT2Dataset):
+    def __init__(self, cfg, split):
+        super().__init__(cfg, split)
+        self.stat = np.load("/home/weili/haiyang/PantoMatrix/HDTF/global_stats.npz", allow_pickle=True)
+        self.mean = 0.0
+        self.std = 0.03352
+
+    def __getitem__(self, item):
+        data_item = self.data_list[item]
+        motion_dict = np.load(data_item["motion_path"], allow_pickle=True)
+        sdx, edx = data_item["start_idx"], data_item["end_idx"]
+        # print(motion_dict["random_data"].shape, sdx, edx)
+        motion = motion_dict["random_data"][sdx:edx]
+        # motion = self.normalize(motion, self.mean, self.std)
+        
+        # length = data_item["frames"] - (edx-sdx) - 1
+        # ref_sdx = np.random.randint(0, length)
+        # ref_edx = ref_sdx + (edx-sdx)
+        ref_motion = motion # motion_dict["random_data"][ref_sdx:ref_edx]
+        
+        SMPLX_FPS = 30
+        audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
+        sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
+        edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
+        audio = audio[sdx_audio:edx_audio]
+             
+        motion_tensor = torch.from_numpy(motion).float()
+        audio_tensor = torch.from_numpy(audio).float()
+        ref_motion_tensor = torch.from_numpy(ref_motion).float()
+        # print(motion_tensor.shape[0]/30, audio_tensor.shape[0]/16000)
+
+        return dict(
+            motion_latent=motion_tensor,
+            audio=audio_tensor, 
+            style_latent=ref_motion_tensor,
+        )
