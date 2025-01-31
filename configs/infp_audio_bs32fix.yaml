@@ -12,7 +12,7 @@ test: False
 
 data:
   name_pyfile: "datasets.beat2"
-  class_name: "BEAT2DatasetEamgeFix"
+  class_name: "BEAT2DatasetEamgeRandom"
   train_bs: 32
   meta_paths:
     - "./datasets/data_json/infp_s20_l64_kw2_na2.json"

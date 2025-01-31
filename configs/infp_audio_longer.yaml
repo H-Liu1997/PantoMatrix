@@ -8,7 +8,7 @@ output_dir: ../outputs/
 log_period: 1
 seed: 222
 resume_from_checkpoint: null
-test: False
+test: True
 
 data:
   name_pyfile: "datasets.beat2"
