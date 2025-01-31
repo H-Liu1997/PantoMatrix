@@ -181,7 +181,7 @@ class BEAT2DatasetEamgeRandom(BEAT2Dataset):
         motion = motion_dict["random_data"][sdx:edx]
         # motion = self.normalize(motion, self.mean, self.std)
         
-        if np.random.rand() > 0.5:
+        if np.random.rand() > self.cfg.random_mix:
             length = data_item["frames"] - (edx-sdx) - 1
             ref_sdx = np.random.randint(0, length)
             ref_edx = ref_sdx + (edx-sdx)

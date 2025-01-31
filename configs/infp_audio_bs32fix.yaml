@@ -19,6 +19,7 @@ data:
   test_meta_paths: 
     - "./datasets/data_json/infp_s20_l64_kw2_na2.json"
   pose_norm: False
+  random_mix: 0.5
   
 model:
   name_pyfile: "models.emage_audio.modeling_emage_audio"
