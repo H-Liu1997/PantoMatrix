@@ -40,14 +40,14 @@ class BEAT2Dataset(data.Dataset):
         smplx_data = beat_format_load(data_item["motion_path"], mask=self.joint_mask)
         sdx, edx = data_item["start_idx"], data_item["end_idx"]
         motion = smplx_data["poses"][sdx:edx]
-        SMPLX_FPS = 30
-        downsample_factor = SMPLX_FPS // self.fps
+        
+        downsample_factor = self.cfg.model.pose_fps // self.fps
         motion = motion[::downsample_factor]
         # motion = self.normalize(motion, self.mean, self.std)
         
         audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
-        sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
-        edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
+        sdx_audio = sdx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
+        edx_audio = edx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()
@@ -69,14 +69,14 @@ class BEAT2DatasetEamge(BEAT2Dataset):
         motion = smplx_data["poses"][sdx:edx]
         expressions = smplx_data["expressions"][sdx:edx]
         trans = smplx_data["trans"][sdx:edx]
-        SMPLX_FPS = 30
-        downsample_factor = SMPLX_FPS // self.fps
+        
+        downsample_factor = self.cfg.model.pose_fps // self.fps
         motion = motion[::downsample_factor]
         motion = self.normalize(motion, self.mean, self.std)
         
         audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
-        sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
-        edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
+        sdx_audio = sdx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
+        edx_audio = edx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()
@@ -111,10 +111,10 @@ class BEAT2DatasetEamgeFootContact(BEAT2Dataset):
         ref_edx = ref_sdx + (edx-sdx)
         ref_motion = motion_dict["random_data"][ref_sdx:ref_edx]
         
-        SMPLX_FPS = 30
+        
         audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
-        sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
-        edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
+        sdx_audio = sdx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
+        edx_audio = edx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()
@@ -149,10 +149,10 @@ class BEAT2DatasetEamgeFix(BEAT2Dataset):
         # ref_edx = ref_sdx + (edx-sdx)
         ref_motion = motion # motion_dict["random_data"][ref_sdx:ref_edx]
         
-        SMPLX_FPS = 30
+        
         audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
-        sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
-        edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
+        sdx_audio = sdx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
+        edx_audio = edx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()
@@ -190,10 +190,9 @@ class BEAT2DatasetEamgeRandom(BEAT2Dataset):
         else:
             ref_motion = motion
         
-        SMPLX_FPS = 30
         audio, _ = librosa.load(data_item["audio_path"], sr=self.audio_sr)
-        sdx_audio = sdx * int((1 / SMPLX_FPS) * self.audio_sr)
-        edx_audio = edx * int((1 / SMPLX_FPS) * self.audio_sr)
+        sdx_audio = sdx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
+        edx_audio = edx * int((1 / self.cfg.model.pose_fps) * self.audio_sr)
         audio = audio[sdx_audio:edx_audio]
              
         motion_tensor = torch.from_numpy(motion).float()

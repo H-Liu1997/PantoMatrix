@@ -162,6 +162,23 @@ def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25):
     os.remove(temp_in_path)
     
     
+# def adjust_fps_torch_interp(video_np, output_video, source_fps=25, target_fps=25):
+#     T, H, W, C = video_np.shape
+#     if source_fps == target_fps:
+#         imageio.mimwrite(output_video, video_np, fps=target_fps, quality=5)
+#         # print(f"FPS unchanged, directly saved as {output_video}")
+#         return
+#     new_T = int(round(T * target_fps / source_fps))
+#     video_tensor = torch.from_numpy(video_np).float().cuda()
+#     video_tensor = video_tensor.permute(1, 2, 3, 0).reshape(H*W, C, T)
+#     interp_video = torch.nn.functional.interpolate(video_tensor, scale_factor=target_fps/source_fps, mode='linear', align_corners=False)
+#     # print("before", video_tensor.shape, "after", interp_video.shape)
+#     interp_video = interp_video.reshape(H, W, C, new_T).permute(3, 0, 1, 2)
+#     video_out = interp_video.cpu().numpy().astype(np.uint8).clip(0, 255)
+#     imageio.mimwrite(output_video, video_out, fps=target_fps, quality=5)
+#     print(f"Adjusted FPS from {source_fps} to {target_fps} using time interpolation, saved as {output_video}")
+
+    
 def get_motion_latent(video_path):
     start_time = time.time()
     outputs = process_video_3bbox(video_path)
@@ -174,14 +191,14 @@ def get_motion_latent(video_path):
     test_out_video = os.path.join(pkl_folder, f"{video_id}.mp4")
     orig_out_video = os.path.join(ori_folder, f"{video_id}.mp4")
     
-    start_time = time.time()
+    # start_time = time.time()
     adjust_fps_ffmpeg(frames_np.clip(0, 255), test_out_video, source_fps=outputs["fps"], target_fps=25)
     adjust_fps_ffmpeg(frames_orig.clip(0, 255), orig_out_video, source_fps=outputs["fps"], target_fps=25)
     # imageio.mimwrite(test_out_video, frames_np.clip(0, 255), fps=25)
     # imageio.mimwrite(orig_out_video, frames_orig.clip(0, 255), fps=25)
     # print(f"Converting tensor to video took {time.time() - start_time:.2f} seconds")
     
-    start_time = time.time()
+    # start_time = time.time()
     frames_np = frames_np.astype(np.float32) / 255.
     frames_tensor = torch.from_numpy(frames_np).permute(0, 3, 1, 2).to("cuda")
     frames_tensor = (frames_tensor - 0.5) / 0.5

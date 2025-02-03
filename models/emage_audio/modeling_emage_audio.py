@@ -684,7 +684,7 @@ class EmageAudioModel(PreTrainedModel):
         audio_list = [i.cpu().numpy() for i in audio]
         inputs = self.audio_processor(audio_list, sampling_rate=16000, return_tensors="pt", padding=True).to(audio.device)
         audio2face_fea = self.audio_encoder_face(inputs.input_values)["high_level"]
-        audio2face_fea = F.interpolate(audio2face_fea.transpose(1, 2), scale_factor=245 / 400, mode="linear", align_corners=True).transpose(1, 2)
+        audio2face_fea = F.interpolate(audio2face_fea.transpose(1, 2), scale_factor=self.cfg.pose_fps / 50, mode="linear", align_corners=True).transpose(1, 2)
         bs, n, _ = x.shape
         if audio2face_fea.shape[1] > n:
           audio2face_fea = audio2face_fea[:, :n]
@@ -756,6 +756,7 @@ class EmageAudioModel(PreTrainedModel):
         # Autoregressive inference
         bs, total_len, c = masked_motion.shape
         window = self.cfg.pose_length
+        
         pre_frames = self.cfg.seed_frames
         rounds = (total_len - pre_frames) // (window - pre_frames)
         remain = (total_len - pre_frames) % (window - pre_frames)
@@ -777,8 +778,8 @@ class EmageAudioModel(PreTrainedModel):
             window_mask[:, :pre_frames, :] = 0
             window_style_motion = style_motion[:, start_idx:end_idx, :].clone() if style_motion is not None else None
 
-            audio_slice_len = (end_idx - start_idx)*(16000//30)
-            audio_slice = audio[:, start_idx*(16000//30) : start_idx*(16000//30)+audio_slice_len]
+            audio_slice_len = (end_idx - start_idx)*(16000//self.cfg.pose_fps)
+            audio_slice = audio[:, start_idx*(16000//self.cfg.pose_fps) : start_idx*(16000//self.cfg.pose_fps)+audio_slice_len]
             # print(i, audio_slice.shape, speaker_id.shape, window_motion.shape, window_mask.shape)
             
             bs, t, _ = window_mask.shape
@@ -821,8 +822,8 @@ class EmageAudioModel(PreTrainedModel):
             final_mask[:, :pre_frames, :] = 0
             window_style_motion = style_motion[:, final_start:final_end, :].clone() if style_motion is not None else None
 
-            audio_slice_len = (final_end - final_start)*(16000//30)
-            audio_slice = audio[:, final_start*(16000//30) : final_start*(16000//30)+audio_slice_len]
+            audio_slice_len = (final_end - final_start)*(16000//self.cfg.pose_fps)
+            audio_slice = audio[:, final_start*(16000//self.cfg.pose_fps) : final_start*(16000//self.cfg.pose_fps)+audio_slice_len]
             bs, t, _ = final_mask.shape
             x_init = torch.randn((bs, t, self.cfg.vae_codebook_size), dtype=torch.float32, device=window_mask.device)
             
