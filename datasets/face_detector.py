@@ -74,14 +74,11 @@ def draw_landmarks_on_image(rgb_image, detection_result):
 
 
 class FaceDetector:
-    def __init__(self, mediapipe_model_asset_path, delegate=1, face_detection_confidence=0.5, num_faces=5):
-        # Create a face landmarker instance with the video mode:
+    def __init__(self, mediapipe_model_asset_path, face_detection_confidence=0.5, num_faces=5):
         options = mp.tasks.vision.FaceLandmarkerOptions(
             base_options=mp.tasks.BaseOptions(
                 model_asset_path=mediapipe_model_asset_path,
-                # delegate=mp.tasks.BaseOptions.Delegate.GPU,
-                # TODO: why does the gpu version not work in docker???
-                delegate=delegate,
+                delegate=mp.tasks.BaseOptions.Delegate.GPU
             ),
             running_mode=mp.tasks.vision.RunningMode.IMAGE,
             num_faces=num_faces,

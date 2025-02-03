@@ -10,6 +10,7 @@ from utils import instantiate
 from tqdm import tqdm
 import moviepy.editor as mp
 import argparse
+import time
 
 args = argparse.ArgumentParser()
 args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_longer_20250124-0725/test_100000")
@@ -44,41 +45,63 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
     if not latent_file.endswith(".npy"):
         continue
     file_name = latent_file[:-15]
+    
+    # Time data loading
+    t_start = time.time()
     gt_latent = np.load(os.path.join(gt_latent_dir, file_name + ".npz"), allow_pickle=True)["random_data"]
     gt_latent = torch.from_numpy(gt_latent).to("cuda")
     tgt_latent = np.load(os.path.join(motion_latent_dir, latent_file))
     tgt_latent = torch.from_numpy(tgt_latent).to("cuda").squeeze(0).float()
-    print(tgt_latent.shape)
     
     aligned_video = os.path.join(video_dir, file_name + ".mp4")
     load_video = VideoReader(aligned_video)
     source_img = load_video[0].asnumpy()
     source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda")
-    # print(source_img.shape)
     source_video = [img.asnumpy() for img in load_video]
     source_video = torch.stack([transform(Image.fromarray(img)) for img in source_video]).to("cuda")
-    
+    t_load = time.time() - t_start
+    print(f"Data loading time: {t_load:.2f}s")
     
     src_latent = gt_latent[0:1]
-    # print(src_latent.shape, tgt_latent.shape)
     with torch.no_grad():
-        # Generate latent predictions based on audio inputs
-        face_feat = face_encoder(source_img) 
-        # print(face_feat.shape) 
+        # Time face encoding
+        t_start = time.time()
+        face_feat = face_encoder(source_img)
+        t_face_encode = time.time() - t_start
+        print(f"Face encoding time: {t_face_encode:.2f}s")
+        
         all_recon_imgs = []
         all_gt_recon_imgs = []
+        t_flow_total = 0
+        t_gen_total = 0
+        
         for i in tqdm(range(1, tgt_latent.shape[0])):
-            # print(src_latent.shape, tgt_latent[i:i+1].shape)
+            # Time flow estimation
+            t_start = time.time()
             tgt_latent_refine = flow_estimator(src_latent, tgt_latent[i:i+1])
-            # print(tgt_latent_refine.shape) 
+            t_flow = time.time() - t_start
+            t_flow_total += t_flow
+            
+            # Time face generation
+            t_start = time.time()
             recon_imgs = face_generator(tgt_latent_refine, face_feat)
-            # print(recon_imgs.shape)
+            t_gen = time.time() - t_start
+            t_gen_total += t_gen
+            
             all_recon_imgs.append(recon_imgs)
         
-            # Load ground truth latents
+            # Ground truth reconstruction timing
+            t_start = time.time()
             gt_latent_refine = flow_estimator(src_latent, gt_latent[i:i+1])
-            gt_recon_imgs = face_generator(gt_latent_refine, face_feat)
-            all_gt_recon_imgs.append(gt_recon_imgs)
+            recon_imgs = face_generator(gt_latent_refine, face_feat)
+            all_gt_recon_imgs.append(recon_imgs)
+            
+        n_frames = tgt_latent.shape[0] - 1
+        print(f"Average flow estimation time per frame: {t_flow_total/n_frames:.3f}s")
+        print(f"Average face generation time per frame: {t_gen_total/n_frames:.3f}s")
+    
+    # Time video saving
+    t_start = time.time()
     recon_imgs = torch.cat(all_recon_imgs, dim=0)
     gt_recon_imgs = torch.cat(all_gt_recon_imgs, dim=0)
     # Visualize and save ground truth, reference image, audio predictions, and reconstructed images in a 2x2 grid
@@ -100,9 +123,12 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
             lower_row = np.concatenate([ref_img_original, video_pred[i]], axis=1)
             combined = np.concatenate([upper_row, lower_row], axis=0)
             writer.append_data(combined)
+    t_save = time.time() - t_start
+    print(f"Video saving time: {t_save:.2f}s")
     
     audio_path = os.path.join(gt_latent_dir.replace("cache_latent", "cache_audio"), file_name + ".wav")
     if os.path.exists(audio_path):
+        t_start = time.time()
         video_clip = mp.VideoFileClip(save_video_path)
         audio_clip = mp.AudioFileClip(audio_path)
         video_with_audio = video_clip.set_audio(audio_clip)
@@ -110,4 +136,6 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
         video_with_audio.write_videofile(final_output_path, codec="libx264", audio_codec="aac")
         video_clip.close()
         audio_clip.close()
+        t_audio = time.time() - t_start
+        print(f"Audio processing time: {t_audio:.2f}s")
     break

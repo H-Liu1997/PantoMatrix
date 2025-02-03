@@ -21,6 +21,7 @@ class BEAT2Dataset(data.Dataset):
         self.data_list = self.vid_meta
         self.fps = cfg.model.pose_fps
         self.audio_sr = cfg.model.audio_sr
+        self.cfg = cfg
 
     def __len__(self):
         return len(self.data_list)
@@ -181,7 +182,7 @@ class BEAT2DatasetEamgeRandom(BEAT2Dataset):
         motion = motion_dict["random_data"][sdx:edx]
         # motion = self.normalize(motion, self.mean, self.std)
         
-        if np.random.rand() > self.cfg.random_mix:
+        if np.random.rand() > self.cfg.data.random_mix:
             length = data_item["frames"] - (edx-sdx) - 1
             ref_sdx = np.random.randint(0, length)
             ref_edx = ref_sdx + (edx-sdx)

@@ -141,8 +141,8 @@ data:
     - True
   convert_mediapipe_to_s3fd: True
   
-  n_sample_frames: 15
-  past_n: 2
+  n_sample_frames: 40
+  past_n: 5
   train_fps: 15
   dataloader: EmoVideoDatasetAlex
   train_mask_scale: 1.0
