@@ -15,16 +15,16 @@ data:
   class_name: "BEAT2DatasetEamgeRandom"
   train_bs: 32
   meta_paths:
-    - "./datasets/data_json/infp_s20_l64_kw2_na2.json"
+    - "./datasets/data_json/infp_s13_l40_kw2_na2.json"
   test_meta_paths: 
-    - "./datasets/data_json/infp_s20_l64_kw2_na2.json"
+    - "./datasets/data_json/infp_s13_l40_kw2_na2.json"
   pose_norm: False
   random_mix: 1.0
   
 model:
   name_pyfile: "models.emage_audio.modeling_emage_audio"
   class_name: "EmageAudioModel"
-  pose_fps: 25
+  pose_fps: 24
   motion_f: 256
   pose_dims: 330
   pose_rep: "smplx"

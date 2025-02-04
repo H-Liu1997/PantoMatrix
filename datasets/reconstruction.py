@@ -18,7 +18,7 @@ args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatr
 args = args.parse_args()
 
 transform = T.Compose([
-    T.Resize((512, 512), interpolation=T.InterpolationMode.BICUBIC),
+    # T.Resize((512, 512), interpolation=T.InterpolationMode.BICUBIC),
     T.ToTensor(),
     T.Normalize([0.5], [0.5])
 ])
@@ -57,8 +57,8 @@ for latent_file in tqdm(os.listdir(motion_latent_dir)):
     load_video = VideoReader(aligned_video)
     source_img = load_video[0].asnumpy()
     source_img = transform(Image.fromarray(source_img)).unsqueeze(0).to("cuda")
-    source_video = [img.asnumpy() for img in load_video]
-    source_video = torch.stack([transform(Image.fromarray(img)) for img in source_video]).to("cuda")
+    source_video = load_video.get_batch(range(len(load_video))).asnumpy()
+    source_video = torch.from_numpy(source_video).float().to("cuda")/255*2-1
     t_load = time.time() - t_start
     print(f"Data loading time: {t_load:.2f}s")
     

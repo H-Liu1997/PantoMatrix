@@ -104,6 +104,7 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     test_list = []
     for data_meta_path in test_path:
         test_list.extend(json.load(open(data_meta_path, "r")))
+    # print(test_list)
     test_list = [item for item in test_list if item.get("mode") == "test_wild"]
     seen_ids = set()
     test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
@@ -114,10 +115,11 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     test_loss = 0
     counter = 0
     # hard coding here
-    style_path_1 = "./HDTF/cache_latent/WDA_AlexandriaOcasioCortez_000_000.npz"
-    style_path_2 = "./HDTF/cache_latent/RD_Radio10_000_000.npz"
+    style_path_1 = "./HDTF/cache_latent_v4/WDA_AlexandriaOcasioCortez_000_000.npz"
+    style_path_2 = "./HDTF/cache_latent_v4/RD_Radio10_000_000.npz"
     ref_video_id_1 = "WDA_AlexandriaOcasioCortez_000_000"
     ref_video_id_2 = "RD_Radio10_000_000"
+    # print(test_list)
     for test_file in tqdm(test_list, desc="Testing"):
         # counter += 1
         # if counter == 9: break

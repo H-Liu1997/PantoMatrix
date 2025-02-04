@@ -756,11 +756,11 @@ class EmageAudioModel(PreTrainedModel):
         # Autoregressive inference
         bs, total_len, c = masked_motion.shape
         window = self.cfg.pose_length
-        
+        # 56*4
         pre_frames = self.cfg.seed_frames
-        rounds = (total_len - pre_frames) // (window - pre_frames)
-        remain = (total_len - pre_frames) % (window - pre_frames)
-        
+        rounds = (total_len - window) // (window - pre_frames) + 1
+        remain = (total_len - window) % (window - pre_frames)
+        # print(total_len, pre_frames, window, rounds, remain)
         rec_all_face = []
         last_motion = masked_motion[:, :pre_frames, :]
         for i in range(rounds):
@@ -807,7 +807,7 @@ class EmageAudioModel(PreTrainedModel):
             last_motion = face_latent[:, -pre_frames:, :]
             # print(face_latent[:, :-pre_frames, :].shape)
 
-        if remain > pre_frames:
+        if remain > 0:
             final_start = rounds*(window - pre_frames)
             final_end = final_start + pre_frames + remain
 

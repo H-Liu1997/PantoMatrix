@@ -24,7 +24,7 @@ data:
 model:
   name_pyfile: "models.emage_audio.modeling_emage_audio"
   class_name: "EmageAudioModel"
-  pose_fps: 25
+  pose_fps: 24
   motion_f: 256
   pose_dims: 330
   pose_rep: "smplx"

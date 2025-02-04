@@ -25,19 +25,19 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--job_id", type=int, default=0)
 args = parser.parse_args()
 
-cache_path = "./HDTF/cache_latent_v2"
-audio_folder = "./HDTF/cache_audio_v2"
-pkl_folder = "./HDTF/cache_facedet_v2"
-ori_folder = "./HDTF/cache_ori_v2"
+cache_path = "./HDTF/cache_latent_v4"
+audio_folder = "./HDTF/cache_audio_v4"
+pkl_folder = "./HDTF/cache_facedet_v4"
+ori_folder = "./HDTF/cache_ori_v4"
 os.makedirs(cache_path, exist_ok=True)
 os.makedirs(audio_folder, exist_ok=True)
 os.makedirs(pkl_folder, exist_ok=True)
 os.makedirs(ori_folder, exist_ok=True)
-none_face_list = "./HDTF/none_face_v2.txt"
+none_face_list = "./HDTF/none_face_v4.txt"
 if not os.path.exists(none_face_list):
     with open(none_face_list, "w") as f:
         pass
-cropped_list = "./HDTF/cropped_list_v2.txt"
+cropped_list = "./HDTF/cropped_list_v4.txt"
 if not os.path.exists(cropped_list):
     with open(cropped_list, "w") as f:
         pass
@@ -149,18 +149,47 @@ def process_video_3bbox(video_path, mouth_bbox_scale=1.4, eye_bbox_scale=1.6, no
         }
         
 
-def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25):
+# def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25, video_source_path=None):
+#     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_in:
+#         temp_in_path = temp_in.name
+#     imageio.mimwrite(temp_in_path, video_np, fps=source_fps, quality=8)
+#     cmd = ["ffmpeg", "-y", "-i", temp_in_path, "-vf", f"fps={target_fps}", output_video, ]
+#     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+#     if proc.returncode != 0:
+#         os.remove(temp_in_path)
+#         raise RuntimeError(proc.stderr.decode())
+#     print(f"Adjusted FPS from {source_fps} to {target_fps}, saved as {output_video}")
+#     os.remove(temp_in_path)
+    
+def get_video_bitrate(video_path):
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "format=bit_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    bitrate = result.stdout.strip()
+    return int(bitrate) if bitrate.isdigit() else None
+
+def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25, video_source_path=None):
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_in:
         temp_in_path = temp_in.name
-    imageio.mimwrite(temp_in_path, video_np, fps=source_fps, quality=8)
-    cmd = ["ffmpeg", "-y", "-i", temp_in_path, "-vf", f"fps={target_fps}", output_video]
+    bitrate = get_video_bitrate(video_source_path) if video_source_path else None
+    if bitrate:
+        print(f"Using original bitrate: {bitrate} bps ({bitrate / 1e6:.2f} Mbps)")
+    imageio.mimwrite(temp_in_path, video_np, fps=source_fps, quality=10) 
+    cmd = [
+        "ffmpeg", "-y", "-i", temp_in_path, "-vf", f"fps={target_fps}",
+        "-b:v", f"{bitrate}k" if bitrate else "4000k",  
+        output_video
+    ]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        os.remove(temp_in_path)
-        raise RuntimeError(proc.stderr.decode())
-    print(f"Adjusted FPS from {source_fps} to {target_fps}, saved as {output_video}")
     os.remove(temp_in_path)
-    
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode())
+    print(f"Adjusted FPS from {source_fps} to {target_fps}, saved as {output_video} with bitrate {bitrate or 4000000} bps")
+
     
 # def adjust_fps_torch_interp(video_np, output_video, source_fps=25, target_fps=25):
 #     T, H, W, C = video_np.shape
@@ -192,8 +221,8 @@ def get_motion_latent(video_path):
     orig_out_video = os.path.join(ori_folder, f"{video_id}.mp4")
     
     # start_time = time.time()
-    adjust_fps_ffmpeg(frames_np.clip(0, 255), test_out_video, source_fps=outputs["fps"], target_fps=25)
-    adjust_fps_ffmpeg(frames_orig.clip(0, 255), orig_out_video, source_fps=outputs["fps"], target_fps=25)
+    adjust_fps_ffmpeg(frames_np.clip(0, 255), test_out_video, source_fps=outputs["fps"], target_fps=24, video_source_path=video_path)
+    adjust_fps_ffmpeg(frames_orig.clip(0, 255), orig_out_video, source_fps=outputs["fps"], target_fps=24, video_source_path=video_path)
     # imageio.mimwrite(test_out_video, frames_np.clip(0, 255), fps=25)
     # imageio.mimwrite(orig_out_video, frames_orig.clip(0, 255), fps=25)
     # print(f"Converting tensor to video took {time.time() - start_time:.2f} seconds")

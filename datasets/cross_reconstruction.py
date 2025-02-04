@@ -11,21 +11,24 @@ from tqdm import tqdm
 import moviepy.editor as mp
 import argparse
 
+
 args = argparse.ArgumentParser()
 args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_bs32_20250130-1314/test_0/wild")
 args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/outputs/infp_audio_bs32_20250130-1314/test_0/wild/cross_reconstruct")
+args.add_argument("--fps", type=int, default=24)
 args = args.parse_args()
 
 transform = T.Compose([
-    T.Resize((512, 512), interpolation=T.InterpolationMode.BICUBIC),
+    # T.Resize((512, 512), interpolation=T.InterpolationMode.BICUBIC),
     T.ToTensor(),
     T.Normalize([0.5], [0.5])
 ])
 
 def load_video_frames(video_path):
     vr = VideoReader(video_path)
-    frames = [transform(Image.fromarray(f.asnumpy())).unsqueeze(0) for f in vr]
-    return torch.cat(frames, dim=0).to("cuda")
+    frames_np = vr.get_batch(range(len(vr))).asnumpy()
+    frames_tensor = torch.from_numpy(frames_np).float().permute(0,3,1,2)/255*2-1
+    return frames_tensor.to("cuda")
 
 def generate_predictions(model, src_img, src_latent, tgt_latent):
     with torch.no_grad():
@@ -38,8 +41,8 @@ def generate_predictions(model, src_img, src_latent, tgt_latent):
     return torch.cat(out, dim=0)
 
 motion_latent_dir = args.cache_dir
-gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent/"
-video_dir = "/mnt/weka/training_data_1/hdtf_full/videos_resampled/"
+gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v4/"
+video_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_ori_v4/"
 save_path = args.save_dir
 os.makedirs(save_path, exist_ok=True)
 
@@ -106,7 +109,7 @@ for f in files:
     # vid1_ref_np = np.clip(vid1_ref_np, 0, 255).astype("uint8")
     ref_img_vis = np.clip(ref_img_vis, 0, 255).astype("uint8")
     out_name = os.path.join(save_path, f"{gt_id}_vs_{ref_id}_2x4.mp4")
-    with imageio.get_writer(out_name, fps=30) as writer:
+    with imageio.get_writer(out_name, fps=args.fps) as writer:
         for i in range(frames_len):
             row1_col1 = vid1_gt_np[i]
             row1_col2 = vid1_rec_np[i]
