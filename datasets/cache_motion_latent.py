@@ -48,7 +48,6 @@ if not os.path.exists(face_landmarker_path):
     urllib.request.urlretrieve(url, face_landmarker_path)
 
 detector = FaceDetector(face_landmarker_path, face_detection_confidence=0.5, num_faces=5)
-
 config = OmegaConf.load("/home/weili/haiyang/PantoMatrix/datasets/motion_gen_train.yaml")
 motion_encoder = instantiate(config.model.motion_encoder)
 params = torch.load(config.model.motion_encoder_path)["state_dict"]
@@ -56,15 +55,37 @@ adjusted_dict = {k.replace("motion_encoder.", ""): v for k, v in params.items() 
 motion_encoder.load_state_dict(adjusted_dict)
 motion_encoder = motion_encoder.to("cuda")
 
+# def bbox_in_center(video_id):
+#     meta_data = np.load(os.path.join(meta_path, video_id, 'metadata.npz'), allow_pickle=True)
+#     bbox_data = meta_data['arr_0'].item()  # Convert to dictionary
+   
+#     # Extract bounding box
+#     frame_data = bbox_data.get('frame_data', {})
+#     bounding_boxes = frame_data.get('bounding_box', {})
 
-def tensor_to_video(tensor, out_path="output.mp4", fps=25):
-    frames = []
-    for i in range(tensor.shape[0]):
-        frame = tensor[i]
-        frame = (frame * 0.5 + 0.5) * 255.0
-        frame = frame.clamp(0, 255).permute(1, 2, 0).byte().cpu().numpy()
-        frames.append(frame)
-    imageio.mimwrite(out_path, frames, fps=fps)
+#     # Get the first bounding box (assuming we use frame 0)
+#     if 0 in bounding_boxes:
+#         bbox = bounding_boxes[0]  # This should be a NumPy array
+#         if bbox.shape[0] > 0:  # Ensure it's non-empty
+#             # Compute center for the first bounding box entry
+#             centerx = bbox[0][0] + (bbox[0][2] - bbox[0][0]) / 2
+#             centery = bbox[0][1] + (bbox[0][3] - bbox[0][1]) / 2
+#             # print(f"Center: ({centerx}, {centery})")
+     
+#     # get h, w
+#     ori_video = os.path.join(root_path, video_id + '.mp4')
+#     cap = cv2.VideoCapture(ori_video)
+#     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+#     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+#     # print(f"Width: {w}, Height: {h}")
+#     relativex = centerx / w
+#     relativey = centery / h
+#     # print(f"Relative: ({relativex}, {relativey})")
+#     if abs(relativex - 0.5) > 0.10 or abs(relativey - 0.5) > 0.10:
+#         print(f"Warning: Center not in the middle for {video_id}")
+#         return False
+#     else:
+#         return True
     
 def process_video_3bbox(video_path, mouth_bbox_scale=1.4, eye_bbox_scale=1.6, none_face_list=none_face_list):
     import pickle
@@ -107,59 +128,18 @@ def process_video_3bbox(video_path, mouth_bbox_scale=1.4, eye_bbox_scale=1.6, no
                 mask[y0:y1, x0:x1] = 255
             merged = f * (mask[..., None] / 255.) + face_contour[:, :, :3] * (1 - mask[..., None] / 255.)
             out_list.append(merged.astype(np.uint8))   
-            metadata[i] = {
-                "mouth": res[6],
-                "eyes": res[7],
-                "contour": res[8]
-            } 
+            # metadata[i] = {
+            #     "mouth": res[6],
+            #     "eyes": res[7],
+            #     "contour": res[8]
+            # } 
             
-    # crop the center of the face 
-    fc = np.zeros(2)
-    for i in range(len(out_list)):
-        cnt = metadata[i]["contour"][0]
-        pts = cnt.reshape(-1, cnt.shape[-1]) if cnt.ndim == 3 else cnt
-        fc += np.mean(pts[:, :2], axis=0)
-    fc /= len(out_list)
-    H, W = out_list[0].shape[:2]
-    fc[0] *= W
-    fc[1] *= H
-    # print(fc)
-    center = np.array([W / 2, H / 2])
-    allowed = np.array([0.1 * W, 0.1 * H])
-    if np.all(np.abs(fc - center) <= allowed):
-        return {
+    return {
         "orig_video": frames.astype(np.uint8),
         "proc_video": np.stack(out_list),
         "fps": fps,
         }
-    else:
-        m = int(min(fc[0], W - fc[0], fc[1], H - fc[1]))
-        x0, y0 = int(fc[0] - m), int(fc[1] - m)
-        crop_size = m * 2
-        proc_video = np.array([cv2.resize(frame[y0:y0+crop_size, x0:x0+crop_size], (512, 512), interpolation=cv2.INTER_CUBIC) for frame in out_list])
-        orig_video = np.array([cv2.resize(frame[y0:y0+crop_size, x0:x0+crop_size], (512, 512), interpolation=cv2.INTER_CUBIC) for frame in frames_np])
-        scale_factor = 512 / crop_size
-        print(f"Video {video_id} cropped: original {W}x{H}, crop region {crop_size}x{crop_size}, scale factor {scale_factor:.2f}")
-        with open(cropped_list, "a+") as cropped_file:
-            cropped_file.write(f"{video_path}\n")
-        return {
-            "orig_video": orig_video,
-            "proc_video": proc_video,
-            "fps": fps,
-        }
-        
-
-# def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25, video_source_path=None):
-#     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_in:
-#         temp_in_path = temp_in.name
-#     imageio.mimwrite(temp_in_path, video_np, fps=source_fps, quality=8)
-#     cmd = ["ffmpeg", "-y", "-i", temp_in_path, "-vf", f"fps={target_fps}", output_video, ]
-#     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-#     if proc.returncode != 0:
-#         os.remove(temp_in_path)
-#         raise RuntimeError(proc.stderr.decode())
-#     print(f"Adjusted FPS from {source_fps} to {target_fps}, saved as {output_video}")
-#     os.remove(temp_in_path)
+    
     
 def get_video_bitrate(video_path):
     cmd = [
@@ -171,6 +151,7 @@ def get_video_bitrate(video_path):
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     bitrate = result.stdout.strip()
     return int(bitrate) if bitrate.isdigit() else None
+
 
 def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25, video_source_path=None):
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_in:
@@ -189,23 +170,6 @@ def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25, vide
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.decode())
     print(f"Adjusted FPS from {source_fps} to {target_fps}, saved as {output_video} with bitrate {bitrate or 4000000} bps")
-
-    
-# def adjust_fps_torch_interp(video_np, output_video, source_fps=25, target_fps=25):
-#     T, H, W, C = video_np.shape
-#     if source_fps == target_fps:
-#         imageio.mimwrite(output_video, video_np, fps=target_fps, quality=5)
-#         # print(f"FPS unchanged, directly saved as {output_video}")
-#         return
-#     new_T = int(round(T * target_fps / source_fps))
-#     video_tensor = torch.from_numpy(video_np).float().cuda()
-#     video_tensor = video_tensor.permute(1, 2, 3, 0).reshape(H*W, C, T)
-#     interp_video = torch.nn.functional.interpolate(video_tensor, scale_factor=target_fps/source_fps, mode='linear', align_corners=False)
-#     # print("before", video_tensor.shape, "after", interp_video.shape)
-#     interp_video = interp_video.reshape(H, W, C, new_T).permute(3, 0, 1, 2)
-#     video_out = interp_video.cpu().numpy().astype(np.uint8).clip(0, 255)
-#     imageio.mimwrite(output_video, video_out, fps=target_fps, quality=5)
-#     print(f"Adjusted FPS from {source_fps} to {target_fps} using time interpolation, saved as {output_video}")
 
     
 def get_motion_latent(video_path):
@@ -228,6 +192,8 @@ def get_motion_latent(video_path):
     # print(f"Converting tensor to video took {time.time() - start_time:.2f} seconds")
     
     # start_time = time.time()
+    frames_video = VideoReader(test_out_video)
+    frames_np = frames_video.get_batch(range(len(frames_video))).asnumpy()
     frames_np = frames_np.astype(np.float32) / 255.
     frames_tensor = torch.from_numpy(frames_np).permute(0, 3, 1, 2).to("cuda")
     frames_tensor = (frames_tensor - 0.5) / 0.5

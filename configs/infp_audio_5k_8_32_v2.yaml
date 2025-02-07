@@ -19,7 +19,7 @@ data:
   test_meta_paths: 
     - "./datasets/data_json/infp_s20_l64_kw2_na2.json"
   pose_norm: False
-  random_mix: 0.0
+  random_mix: 1.0
   
 model:
   name_pyfile: "models.emage_audio.modeling_emage_audio"
@@ -62,7 +62,7 @@ validation:
   evaluation: False
   wandb: False
   val_loss_steps: 1000
-  denoising_steps: 10
+  denoising_steps: 20
 
 # weight_dtype: 'fp32'  # [fp16, fp32]
 # uncond_ratio: 0.1
@@ -82,7 +82,7 @@ noise_scheduler_kwargs:
 solver:
   gradient_accumulation_steps: 1
   gradient_checkpointing: False 
-  max_train_steps: 200000
+  max_train_steps: 2000000
   max_grad_norm: 0.99
   # lr
   learning_rate: 2e-5

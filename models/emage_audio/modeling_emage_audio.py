@@ -16,6 +16,24 @@ import inspect
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers import DiffusionPipeline
 
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_seq_len=60):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_seq_len, d_model)
+        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
 class TimestepEncoding(nn.Module):
     def __init__(self, embedding_dim: int):
         super().__init__()
@@ -648,6 +666,7 @@ class EmageAudioModel(PreTrainedModel):
         nn.init.normal_(self.memory_bank, 0, self.cfg.hidden_size**-0.5)
         
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
+        # self.position_embeddings = PositionalEncoding(self.cfg.hidden_size, max_seq_len=self.cfg.pose_length)
         # self.audio_motion_cross_attn_layer = nn.TransformerDecoderLayer(d_model=self.cfg.hidden_size,nhead=4,dim_feedforward=self.cfg.hidden_size*2)
         # face decoder
         self.input_up = nn.Linear(self.cfg.vae_codebook_size, self.cfg.hidden_size)

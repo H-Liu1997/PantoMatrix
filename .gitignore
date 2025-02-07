@@ -8,3 +8,6 @@ __pycache__/
 */__pycache__/
 **/__pycache__/
 face_landmarker.task
+*.model
+*.pt
+*.pth
