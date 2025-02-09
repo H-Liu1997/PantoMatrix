@@ -1,0 +1,98 @@
+wandb_project: 'infp'
+exp_name: 'debug'
+debug: False
+wandb_entity: 'liu1997'
+wandb_key: "91fe156c60374c4eb00dd6a990017b0371e32737"
+# wandb_log_dir: '/content/outputs/wandb'
+output_dir: ../outputs/
+log_period: 1
+seed: 222
+resume_from_checkpoint: null
+test: False
+
+data:
+  name_pyfile: "datasets.beat2"
+  class_name: "BEAT2DatasetEamgeRandom"
+  train_bs: 32
+  meta_paths:
+    - "./datasets/data_json/infp_s20_l64_kw2_na2_v4.json"
+  test_meta_paths: 
+    - "./datasets/data_json/infp_s20_l64_kw2_na2_v4.json"
+  pose_norm: False
+  random_mix: 1.0
+  
+model:
+  name_pyfile: "models.emage_audio.modeling_emage_audio"
+  class_name: "EmageAudioModel"
+  pose_fps: 24
+  motion_f: 256
+  pose_dims: 330
+  pose_rep: "smplx"
+  audio_rep: wave16k
+  audio_sr: 16000
+  audio_fps: 16000
+  audio_norm: False
+  audio_f: 256
+  speaker_f: 768
+  speaker_dims: 1
+  hidden_size: 768
+  seed_frames: 8 
+  pose_length: 64
+  stride: 20
+  test_length: 64
+  joint_mask: null
+  vae_codebook_size: 512
+  ll: 0
+  lf: 3
+  lu: 0
+  lh: 0
+  cl: 0
+  cf: 0
+  cu: 0
+  ch: 0 
+  denoising_steps: ${validation.denoising_steps}
+  seed: ${seed}
+  reconstruction_script: single_reconstruction_3k.py
+
+  
+ 
+validation:
+  validation_steps: 500
+  test_steps: 5000
+  visualization: False
+  evaluation: False
+  wandb: False
+  val_loss_steps: 1000
+  denoising_steps: 20
+
+# weight_dtype: 'fp32'  # [fp16, fp32]
+# uncond_ratio: 0.1
+noise_offset: 0.05
+snr_gamma: 5.0
+enable_zero_snr: False
+
+noise_scheduler_kwargs:
+  num_train_timesteps: 1000
+  beta_start:          0.00085
+  beta_end:            0.012
+  beta_schedule:       "linear"
+  steps_offset:        1
+  clip_sample:         false
+  prediction_type:     "sample"
+
+solver:
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: False 
+  max_train_steps: 200000
+  max_grad_norm: 0.99
+  # lr
+  learning_rate: 2e-5
+  scale_lr: False 
+  lr_warmup_steps: 1000
+  lr_scheduler: 'constant'
+  # optimizer
+  use_8bit_adam: False 
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay:  0.0
+  adam_epsilon: 1.0e-8

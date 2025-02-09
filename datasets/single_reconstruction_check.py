@@ -10,10 +10,11 @@ from utils import instantiate
 from tqdm import tqdm
 import moviepy.editor as mp
 import argparse
+import json
 
 args = argparse.ArgumentParser()
-args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v6/")
-args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions_v6/")
+args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v4/")
+args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions_v4/")
 args = args.parse_args()
 
 transform = T.Compose([
@@ -22,12 +23,12 @@ transform = T.Compose([
 ])
 
 motion_latent_dir = args.cache_dir
-gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v6/"
+gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v4/"
 video_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6/"
 save_path = args.save_dir
 os.makedirs(save_path, exist_ok=True)
 
-config = OmegaConf.load("/home/weili/haiyang/PantoMatrix/datasets/audio_head_animator.yaml")
+config = OmegaConf.load("/home/weili/haiyang/PantoMatrix/datasets/audio_head_animator_v4.yaml")
 module = instantiate(config.model, instantiate_module=False)
 model = module(config=config)
 checkpoint = torch.load(config.resume_ckpt)
@@ -38,13 +39,29 @@ flow_estimator = model.flow_estimator
 face_generator = model.face_generator
 face_encoder = model.face_encoder
 
-for latent_file in tqdm(os.listdir(motion_latent_dir)):
-    if not latent_file.endswith(".npy"):
-        continue
-    file_name = latent_file[:-15]
+
+def parse_name(fname):
+    base = fname[:-4]
+    parts = base.split('_')
+    return '_'.join(parts[:2]), '_'.join(parts[2:])
+
+# merge audio and video
+test_path = ["/home/weili/haiyang/PantoMatrix/datasets/data_json/infp_s20_l64_kw2_na2_v6.json"]
+test_list = []
+for data_meta_path in test_path:
+    test_list.extend(json.load(open(data_meta_path, "r")))
+test_list = [item for item in test_list if item.get("mode") == "test_wild"]
+seen_ids = set()
+test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
+seen_ids = set()
+test_list = [item for item in test_list if not (parse_name(item["video_id"])[0] in seen_ids or seen_ids.add(parse_name(item["video_id"])[0]))]
+
+motion_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v4/"
+for latent_file in tqdm(test_list):
+    file_name = latent_file["video_id"]
     gt_latent = np.load(os.path.join(gt_latent_dir, file_name + ".npz"), allow_pickle=True)["random_data"]
     gt_latent = torch.from_numpy(gt_latent).to("cuda")
-    tgt_latent = np.load(os.path.join(motion_latent_dir, latent_file))
+    tgt_latent = np.load(os.path.join(motion_latent_dir, file_name + ".npz"), allow_pickle=True)["random_data"]
     tgt_latent = torch.from_numpy(tgt_latent).to("cuda").squeeze(0).float()
     aligned_video = os.path.join(video_dir, file_name + ".mp4")
     load_video = VideoReader(aligned_video)

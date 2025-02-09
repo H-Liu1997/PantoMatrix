@@ -33,6 +33,13 @@ from diffusers.optimization import get_scheduler
 from diffusers import DDIMScheduler
 from diffusers.utils import BaseOutput
 
+
+def parse_name(fname):
+    base = fname[:-4]
+    parts = base.split('_')
+    return '_'.join(parts[:2]), '_'.join(parts[2:])
+
+
 def load_metrics(file_path):
     metrics = {}
     with open(file_path, "r") as f:
@@ -187,8 +194,10 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     for data_meta_path in test_path:
         test_list.extend(json.load(open(data_meta_path, "r")))
     test_list = [item for item in test_list if item.get("mode") == "test_wild"]
+    test_list = sorted(test_list, key=lambda x: x["video_id"])
     seen_ids = set()
-    test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
+    test_list = [item for item in test_list if not (parse_name(item["video_id"])[0] in seen_ids or seen_ids.add(parse_name(item["video_id"])[0]))]
+    print(test_list)
     total_length = 0
     test_loss = 0
     for test_file in tqdm(test_list, desc="Testing"):
@@ -257,16 +266,24 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     # for save_file in os.listdir(save_video_dir):
     #     if save_file.endswith("_final.mp4"):
     #         wandb.log({"test/videos_wild": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
-            
+    
+    recons_script = cfg.reconstruction_script
     save_video_dir = os.path.join(audio_only_save_path, 'single_reconstruct')
-    os.system(f"python ./datasets/single_reconstruction.py --cache_dir {audio_only_save_path} --save_dir {save_video_dir}")
+    os.system(f"python ./datasets/{recons_script} --cache_dir {audio_only_save_path} --save_dir {save_video_dir}")
+    video_to_log = []
     for save_file in os.listdir(save_video_dir):
         if save_file.endswith(".mp4"):
-            wandb.log({"test/videos_audio_only": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
+            wandb_video = wandb.Video(os.path.join(save_video_dir, save_file), caption=f"{steps:06d}-{save_file}")
+            video_to_log.append(wandb_video)
+    wandb.log({"test/videos_audio_only": video_to_log}, step=steps)
+
     os.system(f"python ./metric/eval_all.py --video_pred_path {save_video_dir}")
     text_path = os.path.join(save_video_dir, "metrics.txt")
-    metrics_saved = load_metrics(text_path)
-    metrics.update(metrics_saved)
+    try: 
+        metrics_saved = load_metrics(text_path)
+        metrics.update(metrics_saved)
+    except:
+        print("metrics not saved")
     # save_video_dir = os.path.join(trained_save_path, 'reconstruct')
     # os.system(f"python ./datasets/reconstruction.py --cache_dir {trained_save_path} --save_dir {save_video_dir}")
     # for save_file in os.listdir(save_video_dir):

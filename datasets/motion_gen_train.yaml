@@ -34,8 +34,8 @@ model:
   vae_model_path: ./epoch=0-step=10000.ckpt
   dit_model_path: ./outputs/ckpt/motion_gen_train/epoch=0-step=400.ckpt
   # motion_encoder_path: ./epoch=0-step=45000.ckpt
-  motion_encoder_path: /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_finetune/motion-space-20_vggloss-0.001_ganloss-0_faceloss-5e-05_lr-0.0002_facemask-True/ckpt/epoch=1-step=27500.ckpt
-  
+  motion_encoder_path:  ../epoch=7-step=305000.ckpt # /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_finetune/motion-space-20_vggloss-0.001_ganloss-0_faceloss-5e-05_lr-0.0002_facemask-True/ckpt/epoch=1-step=27500.ckpt
+  # /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_htdf/motion-space-20_vgg-0_gan-0_face-0_face-L1-0.2_lr-0.0002_facemask-True/ckpt/epoch=7-step=305000.ckpt
   vae_dtype: torch.bfloat16
   clip_name: null
   n_embedding: 1024

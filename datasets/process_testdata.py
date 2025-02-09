@@ -16,6 +16,7 @@ fps = 24
 meta_path = '/mnt/weka/training_data_1/hdtf_full/metadata'
 root_path = '/mnt/weka/training_data_1/hdtf_full/videos_resampled'
 
+
 def bbox_in_center(video_id):
     meta_data = np.load(os.path.join(meta_path, video_id, 'metadata.npz'), allow_pickle=True)
     bbox_data = meta_data['arr_0'].item()  # Convert to dictionary
@@ -49,7 +50,6 @@ def bbox_in_center(video_id):
         return True
     
 
-
 def parse_name(fname):
     base = fname[:-4]
     parts = base.split('_')
@@ -80,7 +80,8 @@ for p in tqdm(persons):
         to_remove.append(p)
 print(f"Removing {len(to_remove)} persons")
 
-test_wild_persons = ["RD_Radio10", "WDA_AlexandriaOcasioCortez"]
+test_wild_persons = ['RD_Radio37', 'WDA_NancyPelosi1', 'WDA_JoaquinCastro', 'WRA_JonKyl', 'WDA_LloydDoggett1', 'WRA_RoyBlunt', 'WDA_DebbieWassermanSchultz', 'WRA_MitchDaniels1', 'WRA_CarlyFiorina0', 'WDA_ByronDorgan1', 'WRA_KevinBrady2', 'RD_Radio42', 'RD_Radio14', 'WRA_SteveScalise1', 'WRA_KayBaileyHutchison', 'WDA_TerriSewell', 'RD_Radio35', 'WDA_KathyCastor1', 'WDA_ChrisVanHollen1', 'WRA_DeanHeller']
+# test_wild_persons = ["RD_Radio10", "WDA_AlexandriaOcasioCortez"]
 for p in test_wild_persons:
     print(f"{p} => test_wild")
 
@@ -91,7 +92,7 @@ for p in test_wild_persons:
 
 remaining_persons = list(set(persons) - set(test_wild_persons) - set(to_remove))
 remaining_persons.sort()
-print(remaining_persons)
+print(len(remaining_persons))
 test_audio_only_candidates = []
 for p in remaining_persons:
     bigvideos = data_dict[p].keys()
@@ -171,6 +172,6 @@ process_files(test_audio_only_files, "test_audio_only")
 process_files(test_trained_files, "test_trained")
 process_files(train_files, "train")
 
-out_json = os.path.join(output_dir, f"infp_s{stride}_l{motion_length}_kw{k_wild}_na{n_audio_only}.json")
+out_json = os.path.join(output_dir, f"infp_s{stride}_l{motion_length}_kw{k_wild}_na{n_audio_only}_v4.json")
 with open(out_json, 'w') as f:
     json.dump(clips, f)

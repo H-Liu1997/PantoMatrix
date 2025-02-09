@@ -12,8 +12,8 @@ import moviepy.editor as mp
 import argparse
 
 args = argparse.ArgumentParser()
-args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v6/")
-args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions_v6/")
+args.add_argument("--cache_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v4/")
+args.add_argument("--save_dir", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/test_reconstructions_v4/")
 args = args.parse_args()
 
 transform = T.Compose([
@@ -22,12 +22,12 @@ transform = T.Compose([
 ])
 
 motion_latent_dir = args.cache_dir
-gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v6/"
+gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v4/"
 video_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6/"
 save_path = args.save_dir
 os.makedirs(save_path, exist_ok=True)
 
-config = OmegaConf.load("/home/weili/haiyang/PantoMatrix/datasets/audio_head_animator.yaml")
+config = OmegaConf.load("/home/weili/haiyang/PantoMatrix/datasets/audio_head_animator_v4.yaml")
 module = instantiate(config.model, instantiate_module=False)
 model = module(config=config)
 checkpoint = torch.load(config.resume_ckpt)

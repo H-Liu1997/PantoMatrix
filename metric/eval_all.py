@@ -101,8 +101,8 @@ def evaluate_all_metrics(video_pred_path, gt_path, verbose=False, csim=True):
     
 if __name__ == "__main__":
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument("--video_pred_path", type=str, default="/home/weili/haiyang/outputs/infp_audio_5k_8_56_20250206-0737/test_0/audio_only/single_reconstruct")
-    arg_parser.add_argument("--gt_path", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v4")
+    arg_parser.add_argument("--video_pred_path", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6")
+    arg_parser.add_argument("--gt_path", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6")
     args = arg_parser.parse_args()
-    _ = evaluate_all_metrics(args.video_pred_path, args.gt_path, verbose=True, csim=False)
+    _ = evaluate_all_metrics(args.video_pred_path, args.gt_path, verbose=True, csim=True)
 
