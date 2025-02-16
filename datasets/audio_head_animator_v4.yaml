@@ -8,12 +8,12 @@ cache_dir: cache
 ckpt_dir: ${exp_name}/ckpt
 # resume_ckpt: null # the path to a checkpoint to resume training from
 # 1000 B=128
-resume_ckpt: /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_finetune/motion-space-20_vggloss-0.001_ganloss-0_faceloss-5e-05_lr-0.0002_facemask-True/ckpt/epoch=1-step=27500.ckpt # the path to a checkpoint to resume training from
+resume_ckpt: /home/weili/haiyang/epoch=1-step=27500.ckpt # the path to a checkpoint to resume training from
 
 model:
   module_name: head_animation.audio_head_animator
   class_name: AudioHeadAnimatorModule
-  pretrained_ckpt: /mnt/weka/hw_workspace/xl_workspace/real-time-video-gen-proj/new_main/real-time-video-gen/head_animator_finetune/motion-space-20_vggloss-0.001_ganloss-0_faceloss-5e-05_lr-0.0002_facemask-True/ckpt/epoch=1-step=27500.ckpt # the path to a checkpoint to resume training from
+  pretrained_ckpt: /home/weili/haiyang/epoch=1-step=27500.ckpt # the path to a checkpoint to resume training from
   using_hybrid_mask: True
   dtype: torch.float32
   

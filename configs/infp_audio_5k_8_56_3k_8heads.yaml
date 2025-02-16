@@ -54,8 +54,7 @@ model:
   seed: ${seed}
   reconstruction_script: single_reconstruction_3k.py
   motion_bank_size: 64
-  heads: 4
-  layers: 12
+  heads: 8
 
   
  

@@ -110,9 +110,14 @@ def ms_ssim_metric(vid1, vid2):
 
 
 def video_level_evaluation(pred_path_list, gt_path_list):
+    # print(pred_path_list, gt_path_list)
     psnr_val, ssim_val, lpips_val = 0, 0, 0
     all_gt, all_pred = [], []
     for p_path, g_path in tqdm(zip(pred_path_list, gt_path_list)):
+        p_name = os.path.basename(p_path)
+        g_name = os.path.basename(g_path)
+        # print(p_name, g_name)
+        # assert p_name == g_name, f"Video name not match {p_name} {g_name}"
         p_reader = VideoReader(p_path)
         g_reader = VideoReader(g_path)
         p_frames = []

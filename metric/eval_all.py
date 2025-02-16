@@ -12,6 +12,9 @@ def evaluate_all_metrics(video_pred_path, gt_path, verbose=False, csim=True):
     
     pred_videos = [os.path.join(video_pred_path, v) for v in os.listdir(video_pred_path) if v.endswith(".mp4")]
     gt_videos = [os.path.join(gt_path, v) for v in os.listdir(gt_path) if v.endswith(".mp4")]
+    # sort the videos
+    pred_videos.sort()
+    gt_videos.sort()
     json_root_path = video_pred_path
     syncnet_json = os.path.join(json_root_path, "syncnet_result.json")
     diversity_pred_json = os.path.join(json_root_path, "diversity_result_pred.json")
@@ -101,7 +104,7 @@ def evaluate_all_metrics(video_pred_path, gt_path, verbose=False, csim=True):
     
 if __name__ == "__main__":
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument("--video_pred_path", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6")
+    arg_parser.add_argument("--video_pred_path", type=str, default="/home/weili/haiyang/outputs/infp_audio_5k_8_56_3k_20250209-0902/test_0/audio_only/single_reconstruct/")
     arg_parser.add_argument("--gt_path", type=str, default="/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6")
     args = arg_parser.parse_args()
     _ = evaluate_all_metrics(args.video_pred_path, args.gt_path, verbose=True, csim=True)

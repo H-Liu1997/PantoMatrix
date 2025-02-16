@@ -662,7 +662,7 @@ class EmageAudioModel(PreTrainedModel):
         nn.init.normal_(self.mask_embedding, 0, self.cfg.hidden_size**-0.5)
         
         # motion memory
-        self.memory_bank = nn.Parameter(torch.zeros(1, 64, self.cfg.hidden_size))
+        self.memory_bank = nn.Parameter(torch.zeros(1, self.cfg.motion_bank_size, self.cfg.hidden_size))
         nn.init.normal_(self.memory_bank, 0, self.cfg.hidden_size**-0.5)
         
         self.position_embeddings = PeriodicPositionalEncoding(self.cfg.hidden_size, period=self.cfg.pose_length, max_seq_len=self.cfg.pose_length)
@@ -676,9 +676,9 @@ class EmageAudioModel(PreTrainedModel):
         self.face_motion_cross_audio = nn.ModuleList(
             [
                 FilmTransformerDecoderLayer(
-                    self.cfg.hidden_size, self.cfg.hidden_size, 4, self.cfg.hidden_size*2, 0.1
+                    self.cfg.hidden_size, self.cfg.hidden_size, self.cfg.heads, self.cfg.hidden_size*2, 0.1
                 )
-                for _ in range(4)
+                for _ in range(self.cfg.layers)
             ]
         ) 
         self.face_out_proj = nn.Linear(self.cfg.hidden_size, self.cfg.vae_codebook_size)

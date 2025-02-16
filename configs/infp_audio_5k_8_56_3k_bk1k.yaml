@@ -53,9 +53,8 @@ model:
   denoising_steps: ${validation.denoising_steps}
   seed: ${seed}
   reconstruction_script: single_reconstruction_3k.py
-  motion_bank_size: 64
+  motion_bank_size: 1024
   heads: 4
-  layers: 12
 
   
  
