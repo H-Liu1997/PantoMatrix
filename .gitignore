@@ -11,3 +11,10 @@ face_landmarker.task
 *.model
 *.pt
 *.pth
+home/
+TheSkinDeep/
+syncnet_python/
+HQTalkingHQ200/
+Forbes/
+examples/
+metric/

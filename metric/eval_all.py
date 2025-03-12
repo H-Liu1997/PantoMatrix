@@ -21,39 +21,39 @@ def evaluate_all_metrics(video_pred_path, gt_path, verbose=False, csim=True):
     start = time.time()
     avg_conf = eval_syncnet_videos(pred_videos, syncnet_json, num_workers=8)
     if verbose: print("syncnet time: ", time.time()-start)
-    start = time.time()
-    head_var_pred, exp_var_pred, all_motion_pred = eval_diversity_videos(pred_videos, diversity_pred_json, num_workers=8)
-    if verbose: print("diversity time: ", time.time()-start)
+    # start = time.time()
+    # head_var_pred, exp_var_pred, all_motion_pred = eval_diversity_videos(pred_videos, diversity_pred_json, num_workers=8)
+    # if verbose: print("diversity time: ", time.time()-start)
     
-    start = time.time()
-    head_var_gt, exp_var_gt, all_motion_gt = eval_diversity_videos(gt_videos, diversity_gt_json, num_workers=8)
-    sid_head = calcuate_sid(all_motion_gt, all_motion_pred, type='head')
-    sid_exp = calcuate_sid(all_motion_gt, all_motion_pred, type='exp')
-    if verbose: print("sid time: ", time.time()-start)
+    # start = time.time()
+    # head_var_gt, exp_var_gt, all_motion_gt = eval_diversity_videos(gt_videos, diversity_gt_json, num_workers=8)
+    # sid_head = calcuate_sid(all_motion_gt, all_motion_pred, type='head')
+    # sid_exp = calcuate_sid(all_motion_gt, all_motion_pred, type='exp')
+    # if verbose: print("sid time: ", time.time()-start)
     
-    if csim:
-        start = time.time()
-        csim_score = eval_csim_videos(pred_videos, csim_json)
-        if verbose: print("csim time: ", time.time()-start)
-    else:
-        csim_score = 0.0
+    # if csim:
+    #     start = time.time()
+    #     csim_score = eval_csim_videos(pred_videos, csim_json)
+    #     if verbose: print("csim time: ", time.time()-start)
+    # else:
+    #     csim_score = 0.0
     
-    start = time.time()
-    ssim_results = video_level_evaluation(pred_videos, gt_videos)
-    if verbose: print("ssim time: ", time.time()-start)
+    # start = time.time()
+    # ssim_results = video_level_evaluation(pred_videos, gt_videos)
+    # if verbose: print("ssim time: ", time.time()-start)
 
     if verbose: print("avg_conf: ", avg_conf)
-    if verbose: print("head_var_pred: ", head_var_pred)
-    if verbose: print("exp_var_pred: ", exp_var_pred)
-    # if verbose: print("head_var_gt: ", head_var_gt)
-    # if verbose: print("exp_var_gt: ", exp_var_gt)
-    if verbose: print("sid_head: ", sid_head)
-    if verbose: print("sid_exp: ", sid_exp)
-    if verbose: print("csim_score: ", csim_score)
-    if verbose: print("ssim: ", ssim_results.get("ssim"))
-    if verbose: print("psnr: ", ssim_results.get("psnr"))
-    if verbose: print("fvd: ", ssim_results.get("fvd"))
-    if verbose: print("lpips: ", ssim_results.get("lpips"))
+    # if verbose: print("head_var_pred: ", head_var_pred)
+    # if verbose: print("exp_var_pred: ", exp_var_pred)
+    # # if verbose: print("head_var_gt: ", head_var_gt)
+    # # if verbose: print("exp_var_gt: ", exp_var_gt)
+    # if verbose: print("sid_head: ", sid_head)
+    # if verbose: print("sid_exp: ", sid_exp)
+    # if verbose: print("csim_score: ", csim_score)
+    # if verbose: print("ssim: ", ssim_results.get("ssim"))
+    # if verbose: print("psnr: ", ssim_results.get("psnr"))
+    # if verbose: print("fvd: ", ssim_results.get("fvd"))
+    # if verbose: print("lpips: ", ssim_results.get("lpips"))
     
     save_text_path = os.path.join(video_pred_path, "metrics.txt")
     # print(save_text_path)
@@ -74,29 +74,29 @@ def evaluate_all_metrics(video_pred_path, gt_path, verbose=False, csim=True):
     
     with open(save_text_path, "w") as f:
         f.write("avg_conf: {}\n".format(avg_conf))
-        f.write("head_var_pred: {}\n".format(head_var_pred))
-        f.write("exp_var_pred: {}\n".format(exp_var_pred))
-        f.write("sid_head: {}\n".format(sid_head))
-        f.write("sid_exp: {}\n".format(sid_exp))
-        f.write("csim_score: {}\n".format(csim_score))
-        f.write("ssim: {}\n".format(ssim_results.get("ssim")))
-        f.write("psnr: {}\n".format(ssim_results.get("psnr")))
-        f.write("fvd: {}\n".format(ssim_results.get("fvd")))
-        f.write("lpips: {}\n".format(ssim_results.get("lpips")))
+        # f.write("head_var_pred: {}\n".format(head_var_pred))
+        # f.write("exp_var_pred: {}\n".format(exp_var_pred))
+        # f.write("sid_head: {}\n".format(sid_head))
+        # f.write("sid_exp: {}\n".format(sid_exp))
+        # f.write("csim_score: {}\n".format(csim_score))
+        # f.write("ssim: {}\n".format(ssim_results.get("ssim")))
+        # f.write("psnr: {}\n".format(ssim_results.get("psnr")))
+        # f.write("fvd: {}\n".format(ssim_results.get("fvd")))
+        # f.write("lpips: {}\n".format(ssim_results.get("lpips")))
         
     return {
         "avg_conf": avg_conf,
-        "head_var_pred": head_var_pred,
-        "exp_var_pred": exp_var_pred,
-        # "head_var_gt": head_var_gt,
-        # "exp_var_gt": exp_var_gt,
-        "sid_head": sid_head,
-        "sid_exp": sid_exp,
-        "csim_score": csim_score,
-        "ssim": ssim_results.get("ssim"),
-        "psnr": ssim_results.get("psnr"),
-        "fvd": ssim_results.get("fvd"),
-        "lpips": ssim_results.get("lpips"),
+        # "head_var_pred": head_var_pred,
+        # "exp_var_pred": exp_var_pred,
+        # # "head_var_gt": head_var_gt,
+        # # "exp_var_gt": exp_var_gt,
+        # "sid_head": sid_head,
+        # "sid_exp": sid_exp,
+        # "csim_score": csim_score,
+        # "ssim": ssim_results.get("ssim"),
+        # "psnr": ssim_results.get("psnr"),
+        # "fvd": ssim_results.get("fvd"),
+        # "lpips": ssim_results.get("lpips"),
     }
     
 if __name__ == "__main__":

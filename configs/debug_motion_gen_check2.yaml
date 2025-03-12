@@ -19,37 +19,38 @@ data:
   pose_norm: false
   random_mix: 1.0
 model:
-  name_pyfile: models.emage_audio.modeling_emage_audio
-  class_name: EmageAudioModel
+  name_pyfile: models.emage_audio.motion_gen_check2
+  class_name: MotionGenModel
   pose_fps: 24
   motion_f: 256
-  pose_dims: 330
-  pose_rep: smplx
   audio_rep: wave16k
   audio_sr: 16000
-  audio_fps: 16000
-  audio_norm: false
-  audio_f: 256
-  speaker_f: 768
-  speaker_dims: 1
+  audio_fps: ${model.audio_sr}
+  audio_norm: False
   hidden_size: 768
   seed_frames: 8
   pose_length: 64
-  stride: 20
-  test_length: 64
-  joint_mask: null
   vae_codebook_size: 512
-  ll: 0
-  lf: 3
-  lu: 0
-  lh: 0
-  cl: 0
-  cf: 0
-  cu: 0
-  ch: 0
   denoising_steps: ${validation.denoising_steps}
   seed: ${seed}
-  reconstruction_script: single_reconstruction_3k.py
+  motion_bank_size: 256
+  heads: 8
+  layers: 4
+  blend_frames: True
+  drop_style: 0.5
+  drop_other: 1.0
+  drop_self: 0.0
+  sync_only: True
+  wav2vec_layer: 4
+  drop_self_steps: 
+    - 0
+    - 0 
+  drop_other_steps:
+    - 0
+    - 0
+  reconstruction_script: single_reconstruction_3k_25fps.py
+  joint_mask: null
+  
 validation:
   validation_steps: 500
   test_steps: 5000

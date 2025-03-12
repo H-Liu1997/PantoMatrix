@@ -117,6 +117,7 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     noise_scheduler = kwargs["noise_scheduler"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     actual_model.eval()
+    actual_model.inference_pipeline.setup_scheduler(noise_scheduler)
     
     wild_save_path = os.path.join(save_path, "wild")
     os.makedirs(wild_save_path, exist_ok=True)
@@ -215,7 +216,7 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
             style_motion = motion_latent
         else:
             style_motion = None
-        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
+        motion_latent_pred = actual_model.inference(audio, masked_motion=motion_latent_in, 
                                                     noise_scheduler=noise_scheduler, style_motion=style_motion)  
         current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
         test_loss += current_loss * t
@@ -296,6 +297,14 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
             
     return test_list, save_list, metrics
 
+from importlib import import_module
+def instantiate_motion_gen(module_name, class_name, cfg, hfstyle=False, **init_args):
+    module = import_module(module_name)
+    class_ = getattr(module, class_name)
+    if hfstyle:
+        config_class = class_.config_class
+        cfg = config_class(config_obj=cfg)
+    return class_(cfg, **init_args)
 
 def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     if mode == "train":
@@ -345,7 +354,7 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     else:
         style_motion = style_latent
         
-    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True, style_motion=style_motion)
+    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, masked_motion=motion_latent, mask=mask, style_motion=style_motion)
     if noise_scheduler.prediction_type == "epsilon":
         target = noise
     elif noise_scheduler.prediction_type == "v_prediction":
@@ -411,7 +420,7 @@ def main(cfg):
     if cfg.test:
         model = EmageAudioModel.from_pretrained("/home/weili/haiyang/outputs/infp_audio_5k_8_56_20250203-1908/checkpoints/test_best").to(device) 
     else:
-        model = init_hf_class(cfg.model.name_pyfile, cfg.model.class_name, cfg.model).to(device)
+        model = instantiate_motion_gen(module_name=cfg.model.name_pyfile, class_name=cfg.model.class_name, cfg=cfg.model, hfstyle=False).to(device)
   
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     for name, param in model.named_parameters():
@@ -668,7 +677,7 @@ def log_test(model, metrics, iteration, best_mertics, best_iteration, cfg, local
         if metrics["latent_l1"] < best_mertics:
             best_mertics = metrics["latent_l1"]
             best_iteration = iteration
-            model.module.save_pretrained(os.path.join(experiment_ckpt_dir, "test_best"))
+            # model.module.save_pretrained(os.path.join(experiment_ckpt_dir, "test_best"))
         # print(metrics, best_mertics, best_iteration)
         message = f"Current Test latent_l1: {metrics['latent_l1']:.4f} (Best: {best_mertics:.4f} at iteration {best_iteration})"
         log_metric_with_box(message)
@@ -780,14 +789,17 @@ def init_env():
     with open(os.path.join(sanity_check_dir, f'{config.exp_name}.yaml'), 'w') as f:
         OmegaConf.save(config, f)
     current_dir = Path.cwd()
-    for py_file in current_dir.rglob('*.py'):
-        dest_path = Path(sanity_check_dir) / py_file.relative_to(current_dir)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(py_file, dest_path)
+    # for py_file in current_dir.rglob('*.py'):
+    #     dest_path = Path(sanity_check_dir) / py_file.relative_to(current_dir)
+    #     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    #     shutil.copy(py_file, dest_path)
     return config
 
 if __name__ == "__main__":
     config = init_env()
     main(config)
     
-# CUDA_VISIBLE_DEVICES="4,5" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29509 train_emage_audio.py --config /home/weili/haiyang/PantoMatrix/configs/infp_audio_5k_8_56.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="2,3" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29508 train_emage_audio_check.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check2.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="0,1" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29507 train_emage_audio_check.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check2.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="4,5" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29517 train_emage_audio_check_data.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check_data2.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="6,7" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29510 train_emage_audio_check.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check_data.yaml --evaluation --wandb

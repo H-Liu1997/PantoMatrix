@@ -25,19 +25,19 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--job_id", type=int, default=0)
 args = parser.parse_args()
 
-cache_path = "./HDTF/cache_latent_v6"
-audio_folder = "./HDTF/cache_audio_v6"
-pkl_folder = "./HDTF/cache_facedet_v6"
-ori_folder = "./HDTF/cache_ori_v6"
+cache_path = "./HDTF/cache_latent_v4"
+audio_folder = "./HDTF/cache_audio_v4"
+pkl_folder = "./HDTF/cache_facedet_v4"
+ori_folder = "./HDTF/cache_ori_v4"
 os.makedirs(cache_path, exist_ok=True)
 os.makedirs(audio_folder, exist_ok=True)
 os.makedirs(pkl_folder, exist_ok=True)
 os.makedirs(ori_folder, exist_ok=True)
-none_face_list = "./HDTF/none_face_v6.txt"
+none_face_list = "./HDTF/none_face_v4.txt"
 if not os.path.exists(none_face_list):
     with open(none_face_list, "w") as f:
         pass
-cropped_list = "./HDTF/cropped_list_v6.txt"
+cropped_list = "./HDTF/cropped_list_v4.txt"
 if not os.path.exists(cropped_list):
     with open(cropped_list, "w") as f:
         pass
@@ -212,7 +212,7 @@ def get_motion_latent(video_path):
 
 src_folder = "/mnt/weka/training_data_1/hdtf_full/videos_resampled"
 all_list = sorted([x for x in os.listdir(src_folder) if x.endswith(".mp4")])
-half_lens = len(all_list)//4
+half_lens = len(all_list)//6
 all_list = all_list[args.job_id * half_lens: (args.job_id + 1) * half_lens]
 finished = os.listdir(pkl_folder)
 all_none_face = []

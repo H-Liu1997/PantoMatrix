@@ -117,97 +117,30 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
     noise_scheduler = kwargs["noise_scheduler"]
     actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     actual_model.eval()
+    actual_model.inference_pipeline.setup_scheduler(noise_scheduler)
     
-    wild_save_path = os.path.join(save_path, "wild")
-    os.makedirs(wild_save_path, exist_ok=True)
-    # test_list = []
-    # for data_meta_path in test_path:
-    #     test_list.extend(json.load(open(data_meta_path, "r")))
-    # print(test_list)
-    # test_list = [item for item in test_list if item.get("mode") == "test_wild"]
-    # seen_ids = set()
-    # test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
-    # # single id test
-    save_list = []
-    # start_time = time.time()
-    # total_length = 0
-    # test_loss = 0
-    # counter = 0
-    # hard coding here
-    # style_path_1 = "./HDTF/cache_latent_v4/WDA_AlexandriaOcasioCortez_000_000.npz"
-    # style_path_2 = "./HDTF/cache_latent_v4/RD_Radio10_000_000.npz"
-    # ref_video_id_1 = "WDA_AlexandriaOcasioCortez_000_000"
-    # ref_video_id_2 = "RD_Radio10_000_000"
-    # # print(test_list)
-    # for test_file in tqdm(test_list, desc="Testing"):
-    #     # counter += 1
-    #     # if counter == 9: break
-    #     if ref_video_id_2 not in test_file["video_id"] and ref_video_id_1 not in test_file["video_id"]:
-    #         continue
-    #     audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
-    #     audio = torch.from_numpy(audio).to(device).unsqueeze(0)
-    #     speaker_id = torch.zeros(1,1).to(device).long()
-
-    #     # motion seed
-    #     motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
-    #     motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
-    #     bs, t, _ = motion_latent.shape
-    #     motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
-        
-    #     # three different ways to generate motion
-    #     style_motion = None
-    #     motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
-    #                                                 noise_scheduler=noise_scheduler, style_motion=style_motion)  
-        
-    #     style_motion = motion_latent
-    #     self_style_motion_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
-    #                                                 noise_scheduler=noise_scheduler, style_motion=style_motion)
-        
-    #     style_path = style_path_1 if ref_video_id_2 in test_file["video_id"] else style_path_2
-    #     ref_video_id = ref_video_id_1 if ref_video_id_2 in test_file["video_id"] else ref_video_id_2
-    #     cross_motion_latent = np.load(style_path, allow_pickle=True)["random_data"]
-    #     cross_motion_latent = torch.from_numpy(cross_motion_latent).to(device).unsqueeze(0)
-    #     style_motion = cross_motion_latent
-    #     cross_style_motion_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
-    #                                                 noise_scheduler=noise_scheduler, style_motion=style_motion)
-        
-    #     # calculate loss
-    #     current_loss = torch.abs(motion_latent - self_style_motion_pred).mean()
-    #     test_loss += current_loss * t
-    #     np.savez(os.path.join(wild_save_path, f"{test_file['video_id']}_output.npz"), 
-    #                 no_style=motion_latent_pred.cpu().numpy(), 
-    #                 self_style=self_style_motion_pred.cpu().numpy(),
-    #                 cross_style=cross_style_motion_pred.cpu().numpy(),
-    #                 ref_style=cross_motion_latent.cpu().numpy(),
-    #                 ref_video_id=ref_video_id,
-    #                 gt_video_id=test_file["video_id"])
-    #     total_length+=t
-    # metrics = {
-    #     "latent_l1": test_loss.cpu().numpy()/total_length
-    # }
-    # time_cost = time.time() - start_time
-    # print(f"\n cost {time_cost:.2f} seconds to generate {total_length / cfg.pose_fps:.2f} seconds of motion")
-    
-    audio_only_save_path = os.path.join(save_path, "audio_only")
+    audio_only_save_path = os.path.join(save_path, "speaker_only")
     os.makedirs(audio_only_save_path, exist_ok=True)
+    save_video_dir = os.path.join(audio_only_save_path, 'single_reconstruct')
+
+    test_loss = 0
+    total_length = 0
+    
     test_list = []
     for data_meta_path in test_path:
         test_list.extend(json.load(open(data_meta_path, "r")))
-    test_list = [item for item in test_list if item.get("mode") == "test_wild"]
+    test_list = [item for item in test_list if item.get("mode") == "test_wild" and item.get("dataset_type") == "speaker_only"]
     test_list = sorted(test_list, key=lambda x: x["video_id"])
     seen_ids = set()
-    test_list = [item for item in test_list if not (parse_name(item["video_id"])[0] in seen_ids or seen_ids.add(parse_name(item["video_id"])[0]))]
-    test_list = test_list[:4]
+    test_list = [item for item in test_list if not (parse_name(item["video_id"])[0] in seen_ids or seen_ids.add(parse_name(item["video_id"])[0]))][:4]
     print(test_list)
-    total_length = 0
-    test_loss = 0
+
     for test_file in tqdm(test_list, desc="Testing"):
-        audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
+        audio, _ = librosa.load(test_file["audio_self_path"], sr=cfg.audio_sr)
         audio = torch.from_numpy(audio).to(device).unsqueeze(0)
-        speaker_id = torch.zeros(1,1).to(device).long()
 
         # motion seed
-        motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
+        motion_latent = np.load(test_file["motion_self_path"], allow_pickle=True)["random_data"]
         motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
         bs, t, _ = motion_latent.shape
         motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
@@ -215,87 +148,54 @@ def inference_fn(cfg, model, device, test_path, save_path, **kwargs):
             style_motion = motion_latent
         else:
             style_motion = None
-        motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
-                                                    noise_scheduler=noise_scheduler, style_motion=style_motion)  
+        motion_latent_pred = actual_model.inference(audio, masked_motion=motion_latent_in, 
+                                                    style_motion=style_motion, style_motion_other=None, audio_other=None)  
         current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
         test_loss += current_loss * t
-        np.save(os.path.join(audio_only_save_path, f"{test_file['video_id']}_output.npz"), motion_latent_pred.cpu().numpy())
+        np.savez(os.path.join(audio_only_save_path, f"{test_file['video_id']}_0_output.npz"), 
+                random_data=motion_latent_pred.cpu().numpy(), audio_path=test_file["audio_path"], gt_path=test_file["motion_self_path"], video_id=test_file["video_id"])
         total_length+=t
         metrics = {
         "latent_l1": test_loss.cpu().numpy()/total_length}
-    # metrics.update({
-    #     "latent_l1_audio_only": test_loss.cpu().numpy()/total_length
-    # })
     
-    # trained_save_path = os.path.join(save_path, "trained")
-    # os.makedirs(trained_save_path, exist_ok=True)
-    # test_list = []
-    # for data_meta_path in test_path:
-    #     test_list.extend(json.load(open(data_meta_path, "r")))
-    # test_list = [item for item in test_list if item.get("mode") == "test_trained"]
-    # seen_ids = set()
-    # test_list = [item for item in test_list if not (item["video_id"] in seen_ids or seen_ids.add(item["video_id"]))]
-    # total_length = 0
-    # test_loss = 0
-    # for test_file in tqdm(test_list, desc="Testing"):
-    #     audio, _ = librosa.load(test_file["audio_path"], sr=cfg.audio_sr)
-    #     audio = torch.from_numpy(audio).to(device).unsqueeze(0)
-    #     speaker_id = torch.zeros(1,1).to(device).long()
-
-    #     # motion seed
-    #     motion_latent = np.load(test_file["motion_path"], allow_pickle=True)["random_data"]
-    #     motion_latent = torch.from_numpy(motion_latent).to(device).unsqueeze(0)
-    #     bs, t, _ = motion_latent.shape
-    #     motion_latent_in = motion_latent[:,0:1,:].repeat(1,t,1)
-    #     if steps % 10000 == 0:
-    #         style_motion = motion_latent
-    #     else:
-    #         style_motion = None
-    #     motion_latent_pred = actual_model.inference(audio, speaker_id, masked_motion=motion_latent_in, 
-    #                                                 noise_scheduler=noise_scheduler, style_motion=style_motion)  
-    #     current_loss = torch.abs(motion_latent - motion_latent_pred).mean()
-    #     test_loss += current_loss * t
-    #     np.save(os.path.join(trained_save_path, f"{test_file['video_id']}_output.npz"), motion_latent_pred.cpu().numpy())
-    #     total_length+=t
-    # metrics.update({
-    #     "latent_l1_trained": test_loss.cpu().numpy()/total_length
-    # })
-    
-    # other test
-    # save_video_dir = os.path.join(wild_save_path, 'cross_reconstruct')
-    # os.system(f"python ./datasets/cross_reconstruction.py --cache_dir {wild_save_path} --save_dir {save_video_dir}")
-    # for save_file in os.listdir(save_video_dir):
-    #     if save_file.endswith("_final.mp4"):
-    #         wandb.log({"test/videos_wild": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
-    
-    recons_script = cfg.reconstruction_script
-    save_video_dir = os.path.join(audio_only_save_path, 'single_reconstruct')
-    os.system(f"python ./datasets/{recons_script} --cache_dir {audio_only_save_path} --save_dir {save_video_dir}")
-    print(f"python ./datasets/{recons_script} --cache_dir {audio_only_save_path} --save_dir {save_video_dir}")
-    video_to_log = []
-    for save_file in os.listdir(save_video_dir):
-        if save_file.endswith(".mp4"):
-            wandb_video = wandb.Video(os.path.join(save_video_dir, save_file), caption=f"{steps:06d}-{save_file}")
-            video_to_log.append(wandb_video)
-    wandb.log({"test/videos_audio_only": video_to_log}, step=steps)
-
-    os.system(f"python ./metric/eval_all.py --video_pred_path {save_video_dir}")
-    text_path = os.path.join(save_video_dir, "metrics.txt")
-    try: 
-        metrics_saved = load_metrics(text_path)
-        metrics.update(metrics_saved)
-    except:
-        print("metrics not saved")
-    # save_video_dir = os.path.join(trained_save_path, 'reconstruct')
-    # os.system(f"python ./datasets/reconstruction.py --cache_dir {trained_save_path} --save_dir {save_video_dir}")
-    # for save_file in os.listdir(save_video_dir):
-    #     if save_file.endswith("_final.mp4"):
-    #         wandb.log({"test/videos_trained": wandb.Video(os.path.join(save_video_dir, save_file))}, step=steps)
-    
-    # 
+    if total_length > 0:
+        recons_script = cfg.reconstruction_script
+        gt_latent_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_latent_v6"
+        video_dir = "/home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6"
+        current_path = os.getcwd()
+        audio_only_save_path = audio_only_save_path.replace("..", current_path[:-11]) 
+        print(f"audio_only_save_path: {audio_only_save_path}")
+        cmd = f"cd /home/weili/real-time-video-gen/tools && python ./visualization/{recons_script} --cache_dir {audio_only_save_path} --save_dir {save_video_dir} --gt_latent_dir {gt_latent_dir} --video_dir {video_dir} && cd {current_path}"
+        print(f"Running command: {cmd}")
+        os.system(cmd)
+        
+        if cfg.sync_only:
+            cmd = f"cd /home/weili/real-time-video-gen/tools && python ./evaluation_video/eval_all.py --video_pred_path {save_video_dir} --gt_path /home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6 --sync_only && cd {current_path}"
+        else: 
+            cmd = f"cd /home/weili/real-time-video-gen/tools && python ./evaluation_video/eval_all.py --video_pred_path {save_video_dir} --gt_path /home/weili/haiyang/PantoMatrix/HDTF/cache_merge_v6 && cd {current_path}"
+        print(f"Running command: {cmd}")
+        os.system(cmd)
+        text_path = os.path.join(save_video_dir, "metrics.txt")
+        try: 
+            metrics_saved = load_metrics(text_path)
+            new_metrics = {}
+            for key, value in metrics_saved.items():
+                new_metrics["speaker_only_"+key] = value
+            metrics.update(new_metrics)
+        except:
+            print("speaker only metrics not saved")
+        print(metrics)
             
-    return test_list, save_list, metrics
+    return test_list, [], metrics
 
+from importlib import import_module
+def instantiate_motion_gen(module_name, class_name, cfg, hfstyle=False, **init_args):
+    module = import_module(module_name)
+    class_ = getattr(module, class_name)
+    if hfstyle:
+        config_class = class_.config_class
+        cfg = config_class(config_obj=cfg)
+    return class_(cfg, **init_args)
 
 def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     if mode == "train":
@@ -345,7 +245,7 @@ def train_val_fn(cfg, batch, model, device, mode="train", **kwargs):
     else:
         style_motion = style_latent
         
-    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, speaker_id=speaker_id, masked_motion=motion_latent, mask=mask, use_audio=True, style_motion=style_motion)
+    motion_pred = model(x=noisy_latents, t=timesteps, audio=audio, masked_motion=motion_latent, mask=mask, style_motion=style_motion)
     if noise_scheduler.prediction_type == "epsilon":
         target = noise
     elif noise_scheduler.prediction_type == "v_prediction":
@@ -411,7 +311,7 @@ def main(cfg):
     if cfg.test:
         model = EmageAudioModel.from_pretrained("/home/weili/haiyang/outputs/infp_audio_5k_8_56_20250203-1908/checkpoints/test_best").to(device) 
     else:
-        model = init_hf_class(cfg.model.name_pyfile, cfg.model.class_name, cfg.model).to(device)
+        model = instantiate_motion_gen(module_name=cfg.model.name_pyfile, class_name=cfg.model.class_name, cfg=cfg.model, hfstyle=False).to(device)
   
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     for name, param in model.named_parameters():
@@ -668,7 +568,7 @@ def log_test(model, metrics, iteration, best_mertics, best_iteration, cfg, local
         if metrics["latent_l1"] < best_mertics:
             best_mertics = metrics["latent_l1"]
             best_iteration = iteration
-            model.module.save_pretrained(os.path.join(experiment_ckpt_dir, "test_best"))
+            # model.module.save_pretrained(os.path.join(experiment_ckpt_dir, "test_best"))
         # print(metrics, best_mertics, best_iteration)
         message = f"Current Test latent_l1: {metrics['latent_l1']:.4f} (Best: {best_mertics:.4f} at iteration {best_iteration})"
         log_metric_with_box(message)
@@ -775,19 +675,21 @@ def init_env():
         config.test = True
     save_dir = os.path.join(config.output_dir, config.exp_name)
     os.makedirs(save_dir, exist_ok=True)
-    sanity_check_dir = os.path.join(save_dir, 'sanity_check')
-    os.makedirs(sanity_check_dir, exist_ok=True)
-    with open(os.path.join(sanity_check_dir, f'{config.exp_name}.yaml'), 'w') as f:
-        OmegaConf.save(config, f)
-    current_dir = Path.cwd()
-    for py_file in current_dir.rglob('*.py'):
-        dest_path = Path(sanity_check_dir) / py_file.relative_to(current_dir)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(py_file, dest_path)
+    # sanity_check_dir = os.path.join(save_dir, 'sanity_check')
+    # os.makedirs(sanity_check_dir, exist_ok=True)
+    # with open(os.path.join(sanity_check_dir, f'{config.exp_name}.yaml'), 'w') as f:
+    #     OmegaConf.save(config, f)
+    # current_dir = Path.cwd()
+    # for py_file in current_dir.rglob('*.py'):
+    #     dest_path = Path(sanity_check_dir) / py_file.relative_to(current_dir)
+    #     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    #     shutil.copy(py_file, dest_path)
     return config
 
 if __name__ == "__main__":
     config = init_env()
     main(config)
     
-# CUDA_VISIBLE_DEVICES="4,5" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29509 train_emage_audio.py --config /home/weili/haiyang/PantoMatrix/configs/infp_audio_5k_8_56.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="2,3" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29508 train_emage_audio_check.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check2.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="0,1" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29507 train_emage_audio_check.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check2.yaml --evaluation --wandb 
+# CUDA_VISIBLE_DEVICES="6,7" torchrun --nproc_per_node 2 --nnodes 1 --master_port 29510 train_emage_audio_check.py --config /home/weili/haiyang/PantoMatrix/configs/debug_motion_gen_check_data.yaml --evaluation --wandb

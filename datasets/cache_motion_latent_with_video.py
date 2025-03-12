@@ -173,23 +173,32 @@ def adjust_fps_ffmpeg(video_np, output_video, source_fps=25, target_fps=25, vide
 
     
 def get_motion_latent(video_path):
-    start_time = time.time()
-    outputs = process_video_3bbox(video_path)
-    frames_np = outputs["proc_video"]
-    frames_orig = outputs["orig_video"]
+   #  start_time = time.time()
+    # outputs = process_video_3bbox(video_path)
+    # frames_np = outputs["proc_video"]
+    # frames_orig = outputs["orig_video"]
     # print(f"Processing video {video_path} took {time.time() - start_time:.2f} seconds")
-    if frames_np is None: 
-        return None
+    # if frames_np is None: 
+    #     return None
     video_id = os.path.basename(video_path)[:-4]
     test_out_video = os.path.join(pkl_folder, f"{video_id}.mp4")
     orig_out_video = os.path.join(ori_folder, f"{video_id}.mp4")
     
     # start_time = time.time()
-    adjust_fps_ffmpeg(frames_np.clip(0, 255), test_out_video, source_fps=outputs["fps"], target_fps=24, video_source_path=video_path)
-    adjust_fps_ffmpeg(frames_orig.clip(0, 255), orig_out_video, source_fps=outputs["fps"], target_fps=24, video_source_path=video_path)
+    # adjust_fps_ffmpeg(frames_np.clip(0, 255), test_out_video, source_fps=outputs["fps"], target_fps=24, video_source_path=video_path)
+    # adjust_fps_ffmpeg(frames_orig.clip(0, 255), orig_out_video, source_fps=outputs["fps"], target_fps=24, video_source_path=video_path)
     # imageio.mimwrite(test_out_video, frames_np.clip(0, 255), fps=25)
     # imageio.mimwrite(orig_out_video, frames_orig.clip(0, 255), fps=25)
     # print(f"Converting tensor to video took {time.time() - start_time:.2f} seconds")
+    
+    try: 
+        shutil.copy(test_out_video.replace("cache_facedet_v6", "cache_facedet_v4"), test_out_video)
+    except:
+        return None
+    try:
+        shutil.copy(orig_out_video.replace("cache_ori_v6", "cache_ori_v4"), orig_out_video)
+    except:
+        return None
     
     # start_time = time.time()
     frames_video = VideoReader(test_out_video)
